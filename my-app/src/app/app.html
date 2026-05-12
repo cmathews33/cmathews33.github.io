@@ -1,0 +1,90 @@
+<div class="container">
+  <h1>{{ title() }}</h1>
+  <p>Start by uploading a photo of your space, then add optional details to generate design ideas.</p>
+
+  <form class="form">
+    <!-- Photo Upload Section (Primary) -->
+    <div class="photo-upload-section">
+      <div class="photo-input-wrapper">
+        <input
+          #photoInput
+          type="file"
+          id="photo-input"
+          accept="image/*"
+          (change)="onImageSelected($event)"
+          class="hidden-input">
+        <label for="photo-input" class="photo-upload-label">
+          <div class="photo-upload-content">
+            <span class="photo-text">
+              @if (imagePreview()) {
+                <span>Photo uploaded</span>
+              } @else {
+                <span class="primary-text">Take or Upload a Photo</span>
+              }
+            </span>
+          </div>
+        </label>
+        @if (imagePreview()) {
+          <div class="photo-preview">
+            <img [src]="imagePreview()" alt="Space preview" class="preview-img">
+            <button type="button" (click)="clearImage()" class="clear-image-btn">✕</button>
+          </div>
+        }
+      </div>
+    </div>
+
+    <!-- Optional Details Section (Secondary) -->
+    <div class="optional-section">
+      <h3 class="optional-title">Optional Details</h3>
+      <div class="form-group">
+        <label for="description">Space Description (optional):</label>
+        <textarea id="description" [(ngModel)]="description" name="description" placeholder="e.g., small kitchen, modern style, limited budget..."></textarea>
+      </div>
+
+      <div class="dimensions">
+        <div class="form-group">
+          <label for="length">Length (ft):</label>
+          <input id="length" type="number" [(ngModel)]="length" name="length" min="1">
+        </div>
+        <div class="form-group">
+          <label for="width">Width (ft):</label>
+          <input id="width" type="number" [(ngModel)]="width" name="width" min="1">
+        </div>
+        <div class="form-group">
+          <label for="height">Height (ft):</label>
+          <input id="height" type="number" [(ngModel)]="height" name="height" min="1">
+        </div>
+      </div>
+    </div>
+
+    <button type="button" (click)="generateIdeas()" class="generate-btn">Generate Ideas</button>
+  </form>
+
+  <div class="ideas" *ngIf="ideas().length > 0">
+    <h2>Design Ideas</h2>
+    <p class="subtext">Select an idea below to see the tools and materials needed for that option.</p>
+    <ul>
+      <li *ngFor="let idea of ideas(); let i = index" class="idea-item">
+        <div class="idea-header">
+          <span class="idea-text">{{ idea }}</span>
+          <button
+            type="button"
+            class="materials-toggle"
+            [class.expanded]="expandedIdeaIndex() === i"
+            (click)="toggleIdeaMaterials(i)"
+            [attr.aria-expanded]="expandedIdeaIndex() === i"
+            [attr.aria-label]="'Show materials for idea ' + (i + 1)">
+            <span class="toggle-icon">▼</span>
+          </button>
+        </div>
+        <div class="materials-dropdown" *ngIf="expandedIdeaIndex() === i">
+          <ul class="materials-list">
+            <li *ngFor="let item of getIdeaMaterials(i)">{{ item }}</li>
+          </ul>
+        </div>
+      </li>
+    </ul>
+  </div>
+</div>
+
+
