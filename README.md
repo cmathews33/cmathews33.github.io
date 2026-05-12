@@ -1,5 +1,5 @@
 # DIY Craftsmanship Assistant
-
+TMP GIT ISSUES
 A simple Angular web application that assists in DIY craftsmanship by generating design ideas based on space descriptions and dimensions.
 
 ## Features
