@@ -1,4 +1,0 @@
-/* Clean fallback stylesheet for app component. Actual component styles are defined in app-styles.css. */
-:host {
-  display: block;
-}

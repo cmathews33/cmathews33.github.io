@@ -1,160 +1,238 @@
-# DIY Craftsmanship Assistant - Session Context
+# Harry's Risers: Social Media's Top Rising Stocks
 
 ## Project Overview
-This is an Angular web application designed to assist users with DIY craftsmanship by generating design ideas based on space descriptions and dimensions.
+A web application that surfaces trending stock tickers from StockTwits and Reddit,
+displaying them with price data and social metrics.
 
-## Current State
-- **Framework**: Angular 21 with standalone components
-- **State Management**: Angular Signals for reactive data handling
-- **Forms**: Template-driven forms using FormsModule and [(ngModel)]
-- **Styling**: Basic CSS with responsive design
+**As of the 2026-05 re-architecture, the app is split into a Python backend and a
+thin Angular frontend.** Previously everything ran in the browser; that caused
+Reddit blocking, an exposed Finnhub key, a dev proxy for CORS, and no historical
+accumulation. All data-gathering now happens server-side.
 
-## Key Features Implemented
-1. **Photo Upload Input (Primary)**:
-   - File input with preview display
-   - Large, prominent upload area with dashed border and emoji icon
-   - Image preview with clear button
-   - Demo-only feature (does not actually process images)
+- **Phase 1**: Angular UI ✅ COMPLETED
+- **Phase 2**: Live data integration ✅ COMPLETED (now via backend)
+- **Phase 2.5**: Historical trends tab ✅ COMPLETED (now via backend)
+- **Phase 2.9 (2026-05)**: **Re-architecture to Flask backend on AWS** ✅ COMPLETED (local + infra written; AWS deploy pending)
+- **Phase 3**: Auto trader bot (future)
 
-2. **Optional Details Input (Secondary)**:
-   - Textarea for space description (optional, reduced size)
-   - Number inputs for dimensions: Length, Width, Height (in feet)
+---
 
-3. **Idea Generation**:
-   - Uses room description and dimensions to create placeholder AI prompt messages
-   - Detects room type from description keywords for context
-   - Outputs generic AI generation guidance instead of hardcoded feature lists
-   - Supports expanding individual ideas to reveal tools and materials
+## Current Architecture (post 2026-05 re-architecture)
 
-4. **UI Components**:
-   - Centered container layout
-   - Photo upload section with prominent styling
-   - Optional details collapsible section
-   - Generate button
-   - Idea list with expandable materials dropdowns (per-idea)
-   - Materials dropdown appears under each selected idea
-
-## File Structure
 ```
-src/app/
-├── app.ts          # Main component with signals and generateIdeas() logic
-├── app.html        # Template with form and ideas display
-├── app.config.ts   # Router and providers setup
-├── app.routes.ts   # Empty routes (single-page app)
-└── app.css         # Global styles (currently empty)
-
-src/
-├── index.html      # Updated title: "DIY Craftsmanship Assistant"
-└── main.ts         # Bootstrap file
-
-Other:
-├── AGENTS.md       # Development best practices and guidelines
-├── README.md       # Project description and setup instructions
-└── package.json    # Dependencies and scripts
+EventBridge (rate 30 min)
+   -> CollectorFunction (Lambda) -> Reddit RSS + StockTwits + yfinance -> DynamoDB
+API Gateway (HTTP API)
+   -> ApiFunction (Lambda, Flask) -> DynamoDB (live) / yfinance (historical) -> JSON
+Angular (GitHub Pages, thin client) -> GET /api/stocks, GET /api/historical
 ```
 
-## Code Patterns Used
-- **Signals**: `imageFile`, `imagePreview`, `description`, `length`, `width`, `height`, `ideas`, `expandedIdeaIndex` as signal<File|null>, signal<string>, signal<number|string|string[]>, signal<number|null>
-- **Event Handling**: `(change)="onImageSelected($event)"` for file input, `(click)="generateIdeas()"` on button, `(click)="toggleIdeaMaterials(i)"` for dropdown toggle
-- **Conditional Rendering**: `@if`, `@else` for photo preview display; `*ngIf` for ideas section
-- **Looping**: `*ngFor="let idea of ideas()"` for idea list
-- **Two-way Binding**: `[(ngModel)]` for form inputs (description, dimensions)
+**Key decisions (made with the user):**
+- **Backend:** Python + Flask. Lives in `backend/` at the repo root.
+- **Reddit source is pluggable** (`backend/app/sources/`): `rss` is the default and
+  needs **zero registration** (works today). `praw` is a stubbed drop-in for when
+  Reddit registration clears (`REDDIT_SOURCE=praw`). Devvit was reconsidered and
+  rejected again: it doesn't bypass registration and adds App Review + an
+  HTTP-fetch domain allowlist.
+- **Prices: `yfinance`** — replaced Finnhub entirely. **No API keys anywhere now.**
+- **Deploy:** AWS **Lambda + API Gateway**, **DynamoDB** storage, AWS **SAM** IaC,
+  **container image** Lambdas (yfinance pulls pandas/numpy, too big for a zip).
+- **Frontend:** stays on **GitHub Pages**; became a thin client. All components,
+  styling, and routes are unchanged.
 
-## Generation Logic
-The `generateIdeas()` method:
-1. Reads the description and dimensions from signals
-2. Detects a simple room type from keywords
-3. Computes an area label for small, medium-sized, or large spaces
-4. Sets a generic placeholder list asking for AI-generated ideas
-5. Builds a connected placeholder tools and materials list for the selected idea
+### Backend layout (`backend/`)
+```
+app/
+  __init__.py        # Flask app factory + flask-cors; module-level `app`
+  api.py             # routes: /api/health, /api/stocks, /api/historical
+  handlers.py        # api_handler (apig-wsgi) + collector_handler (EventBridge)
+  models.py          # Stock / TickerMention / RedditPost dataclasses; Stock.to_json()
+  sources/
+    base.py          # RedditSource Protocol + get_reddit_source() factory (env REDDIT_SOURCE)
+    rss.py           # RSSRedditSource (DEFAULT) — feedparser over /r/{sub}/new.rss
+    praw_source.py   # stub, NotImplementedError until registration clears
+  services/
+    stocktwits.py    # GET api.stocktwits.com/.../trending/symbols.json (needs browser UA — see below)
+    prices.py        # yfinance: get_live_prices(), get_period_prices(period)
+    ticker_utils.py  # PORT of frontend ticker-utils.ts (extract/score/build_mention_data)
+    collector.py     # merge_mentions() + collect_live() + collect_historical(period)
+    store.py         # DynamoDB boto3: get_live/put_live/put_snapshots/query_ticker_history
+template.yaml        # SAM: DataTable, ApiFunction(HttpApi), CollectorFunction(ScheduleV2 30min)
+Dockerfile           # public.ecr.aws/lambda/python:3.12 image for both Lambdas
+requirements.txt     # flask, flask-cors, apig-wsgi, boto3, requests, feedparser, yfinance
+README.md            # local run + SAM deploy instructions
+tests/               # pytest: ticker scoring + merge logic (pure, no network)
+```
 
-## Room Types Supported
-- **Kitchen**: detected for placeholder labeling only
-- **Living Room**: detected for placeholder labeling only
-- **Bedroom**: detected for placeholder labeling only
-- **Bathroom**: detected for placeholder labeling only
-- **Generic**: fallback for undetermined descriptions
+### JSON contract (matches the Angular `Stock` interface)
+`Stock.to_json()` emits:
+`{ ticker, name, price, priceChange, percentChange, commentCount, sentiment, source, timestamp }`
+where `timestamp` is ISO 8601. Frontend `ApiService` maps it back to a `Date`.
 
-## Future Enhancement Opportunities
-1. **Photo Analysis (AI Integration)**: Replace demo photo upload with actual image processing API to analyze space photos
-2. **AI Integration**: Replace hardcoded logic with API calls for dynamic ideas based on photo or description
-3. **More Room Types**: Add support for garage, office, patio, etc.
-4. **Advanced Dimensions**: Support multiple units (meters, inches), irregular shapes
-5. **Visual Output**: Add image suggestions or 3D previews based on uploaded photo
-6. **User Preferences**: Save favorite ideas, customization options
-7. **Material Suggestions**: Include DIY material lists and tools needed
-8. **Accessibility**: Ensure full WCAG AAA compliance (currently at AA)
-9. **Design Tone**: Maintain natural palette styling for production-ready appearance
+### Endpoints
+- `GET /api/health` -> `{status:"ok"}`
+- `GET /api/stocks` -> live list. Serves DynamoDB `LIVE/latest` if `DYNAMODB_TABLE`
+  is set; otherwise (local dev) computes live on demand via `collector.collect_live()`.
+- `GET /api/historical?period=1mo|6mo|1yr` -> period price change from yfinance
+  history (real history immediately — DynamoDB accumulates *mention* history over time).
 
-## Development Notes
-- Replaced hardcoded room suggestion lists with placeholder AI generation messaging.
-- Added a new placeholder section for tools and materials needed to complete the job.
-- Implemented idea selection so choosing a generated idea reveals connected materials guidance.
-- Updated landing copy to make the tools/materials connection more prominent.
-- Updated styles and layout to be fully responsive and avoid fixed positioning.
-- Updated container sizing so the form and text area remain aligned on smaller screens.
-- Updated styles to natural tones (light greens, tans, soft browns) for a production-ready appearance.
-- Confirm current app component uses `src/app/app-styles.css` as the active stylesheet.
-- Follows AGENTS.md best practices: standalone components, signals, no NgModules
-- No external dependencies beyond Angular core
-- Ready for `ng serve` to run locally
-- No build errors detected in current implementation
+### DynamoDB schema (single table, PK/SK)
+- `LIVE` / `latest` -> `{ stocks: [...], refreshedAt }` (the cached live snapshot)
+- `TICKER#{sym}` / `DATE#{yyyy-mm-dd}` -> `{ price, mentionCount, source, sentiment, ttl }`
+  (per-ticker daily snapshot; `ttl` expires rows after ~400 days)
 
-## Recent Fixes (May 12, 2026)
-- **app.html Syntax Errors**: Fixed corrupted HTML structure and CSS
-  - Corrected misplaced `<ul>` element - moved inside `.ideas` div with proper `*ngIf` condition
-  - Added missing `<h2>Design Ideas:</h2>` header for ideas section
-  - Removed duplicate and malformed CSS rules
-  - Ensured proper HTML nesting and CSS syntax
+### Merge logic (ported from old stock.service.ts)
+StockTwits fills spots first (returns ~30, usually fills all 20); RSS supplements
+any tickers not already present; capped at 20. See `collector.merge_mentions()`.
 
-## Latest Updates (May 12, 2026 - Current Session)
-- **Dimension Bubbles Spacing**: Increased gap from 1rem to 1.25rem to improve spacing and prevent overlap
-- **Materials Refactored as Dropdowns**: 
-  - Removed global `materials` signal from app.ts
-  - Replaced `selectedIdeaIndex` with `expandedIdeaIndex` signal to track which idea's materials are expanded
-  - Each idea now has its own collapsible materials section
-  - Added `toggleIdeaMaterials(index)` method to toggle dropdown expansion
-  - Added `getIdeaMaterials(index)` method to retrieve materials for a specific idea
-- **Placeholder Content**: Updated idea format to "AI generated idea 1/2/3" and materials to "Tools for idea 1/2/3"
-- **UI Improvements**:
-  - Added toggle button next to each idea with visual chevron icon (▼)
-  - Materials dropdown appears under each idea when button is clicked
-  - Responsive toggle button sizing for different screen sizes
-  - Smooth transitions and hover states for better UX
-  - ARIA attributes added for accessibility (`aria-expanded`, `aria-label`)
-- **CSS Updates**:
-  - Improved dimension input spacing with increased gap
-  - New `.idea-item`, `.idea-header`, `.materials-toggle`, `.materials-dropdown`, `.materials-list` styles
-  - Toggle icon rotates 180° when expanded for visual feedback
-  - Materials list has subtle background and border styling
-  - Responsive adjustments for mobile screens
-- **Accessibility**: Implemented proper ARIA labels and focus states for dropdown toggle buttons
-  - Restored responsive form layout with flexbox for dimensions inputs
-- **Style and Layout Update**: Applied a polished UI design
-  - Created `src/app/app-styles.css` with a refined card layout, gradient background, rounded controls, and modern idea cards
-  - Updated `src/app/app.ts` to use `styleUrls: ['./app-styles.css']`
-  - Kept `src/app/app.html` clean with form markup only and no inline styles
-- **Dimension Bubbles Spacing Fix**: Increased gap to 2rem to prevent overlapping (final fix)
-- **Photo Upload Feature (Demo Only)**:
-  - Added prominent photo upload section as primary user input
-  - New signals: `imageFile` (File | null), `imagePreview` (base64 string)
-  - New methods: `onImageSelected(event)` uses FileReader for preview generation, `clearImage()` removes image
-  - Large dashed border upload area with emoji icon (📸) and hover effects
-  - Photo preview displays with clear button (✕) overlay
-  - Description textarea and dimensions moved to "Optional Details" collapsible section
-  - Reordered form priority: photo upload first, optional details second
-  - Updated page copy to emphasize photo as primary input method
-  - Textarea height reduced from 140px to 100px (secondary input)
-  - New CSS classes: `.photo-upload-section`, `.photo-input-wrapper`, `.hidden-input`, `.photo-upload-label`, `.photo-upload-content`, `.photo-icon`, `.photo-text`, `.primary-text`, `.photo-preview`, `.preview-img`, `.clear-image-btn`, `.optional-section`, `.optional-title`
-  - Note: Feature is UI/demo only and does not actually process image data for AI ideas
+### Local development
 
-## Environment Notes
-- **OS**: macOS
-- **Workspace path**: `/Users/kendallellmer/Desktop/ConnorGithub/general/my-app`
-- **Current active file**: `src/app/app.html`
-- **Last known terminal state**: attempted `npm start` and `npx ng serve --open` from workspace root, with non-zero exit statuses; current working directory is `/Users/kendallellmer/Desktop/ConnorGithub/general/my-app`
-- **Important issue**: `src/app/app.css` became corrupted during styling changes, so a new stylesheet file was created and linked instead
-- **Current app styling**: `app-styles.css` is the authoritative component stylesheet for `App`
-- **Angular conventions**: following standalone component usage and signal-based state
-</content>
-<parameter name="filePath">/Users/kendallellmer/Desktop/ConnorGithub/general/my-app/CONTEXT.md
+**Prerequisites:**
+- Python 3.12+ required. The macOS system `python3` is 3.7.2 (too old).
+  Install via Homebrew: `brew install python`
+
+**First-time setup:**
+```bash
+cd backend
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+**Start the server** (port 8000 — macOS AirPlay blocks 5000):
+```bash
+.venv/bin/flask --app app run --port 8000
+```
+
+**Hit the endpoints** (second terminal):
+```bash
+curl http://localhost:8000/api/health
+curl http://localhost:8000/api/stocks
+curl "http://localhost:8000/api/historical?period=1mo"
+curl "http://localhost:8000/api/historical?period=6mo"
+curl "http://localhost:8000/api/historical?period=1yr"
+
+# Pretty-print
+curl http://localhost:8000/api/stocks | python3 -m json.tool
+```
+
+**Run tests:**
+```bash
+.venv/bin/python -m pytest tests/ -q
+```
+
+Verified locally (2026-05): `/api/stocks` returns 20 tickers with real yfinance
+prices; `/api/historical?period=6mo` returns real period change; CORS preflight +
+headers correct for a browser origin; 6/6 tests pass. Lambda image uses Python 3.12.
+
+### AWS deploy (pending — not run in this environment)
+Requires Docker + AWS SAM CLI + AWS credentials.
+```bash
+cd backend && sam build && sam deploy --guided
+```
+Set `CorsOrigins` to `https://cmathews33.github.io`, leave `RedditSource=rss`.
+Put the stack's `ApiUrl` output into `my-app/src/environments/environment.prod.ts`.
+
+### Gotchas discovered during development
+- **macOS system `python3` is 3.7.2** — install Python via `brew install python`
+  before running `python3 -m venv .venv`.
+- **macOS occupies port 5000** (AirPlay Receiver) — always use `--port 8000`.
+  `environment.ts` `apiBaseUrl` points at `http://localhost:8000`.
+- **StockTwits returns 403 to server/cloud IPs without a browser `User-Agent`**
+  (worked before only because the dev proxy hid this). A browser UA + `Accept:
+  application/json` is set in `services/stocktwits.py`. Confirmed: no-UA -> 403,
+  browser-UA -> 200 (30 symbols).
+- **yfinance** can be throttled on shared Lambda IPs (server-side, different from
+  the old browser CORS rejection). Mitigation: collector runs on a schedule and
+  caches into DynamoDB; the live hot path reads DynamoDB. Fallback option: `stooq`
+  via pandas-datareader in `services/prices.py`.
+- yfinance correctly drops bad/delisted symbols (e.g. `$IRA`).
+
+---
+
+## Frontend (`my-app/`) — thin client
+
+### What changed in the migration
+- **New `src/app/services/api.service.ts`**: `getStocks()` + `getHistorical(period)`
+  hitting `environment.apiBaseUrl`; maps the DTO `timestamp` string to `Date`.
+  Also exports `HistoryPeriod`.
+- **`stock.service.ts`**: now just polls `api.getStocks()` every 15 min. Public
+  signals unchanged (`stocksList`, `isLoading`, `error`, `redditRefreshed`,
+  `priceRefreshed`) — `redditRefreshed`/`priceRefreshed` now both reflect the one
+  backend snapshot. `addStock`/`updateStock` were unused and removed.
+- **`history.service.ts`**: now just calls `api.getHistorical(period)`. Public API
+  unchanged (`HistoryPeriod`, `PeriodState`, `getState()`, `load()`).
+- **`utils/ticker-utils.ts`**: trimmed to only `formatSource()` (display helper).
+  All extract/score logic moved to the Python backend.
+- **Deleted:** `services/price.service.ts`, `reddit.service.ts`,
+  `stocktwits.service.ts`, `reddit-auth.service.ts`, `models/reddit.model.ts`,
+  and `proxy.conf.json`.
+- **`environment.ts`**: dropped `finnhubApiKey` + `redditClientId`; added
+  `apiBaseUrl`. Added `environment.prod.ts` + `fileReplacements` in `angular.json`
+  production config. Removed `proxyConfig` from the serve dev config.
+
+### Build
+```bash
+export PATH="$HOME/.nvm/versions/node/v24.16.0/bin:$PATH"
+node_modules/.bin/ng build      # clean: ~281 kB initial / ~79 kB transfer, 0 warnings
+node_modules/.bin/ng serve      # dev server (needs backend running on :8000)
+```
+
+### Components (unchanged by the migration)
+1. **AppComponent** (`src/app/app.ts`) — renders `<router-outlet>`.
+2. **HeaderComponent** (`components/header/`) — sticky nav, RouterLink/RouterLinkActive.
+3. **StockListComponent** (`components/stock-list/`) — hero + table; injects
+   `StockService`; uses `stocksList/isLoading/error/redditRefreshed/priceRefreshed`
+   and `formatSource`.
+4. **StockCardComponent** (`components/stock-card/`) — reserved for Phase 3 detail.
+5. **HistoryComponent** (`components/history/`) — period tabs; injects
+   `HistoryService` (`getState`/`load`); `effect()` loads on tab switch.
+
+### Data Model (`src/app/models/stock.model.ts`) — unchanged
+```typescript
+interface Stock {
+  ticker: string; name: string; price: number; priceChange: number;
+  percentChange: number; commentCount: number;
+  sentiment: 'positive' | 'neutral' | 'negative';
+  source: string; timestamp: Date;
+}
+```
+
+### Styling — unchanged
+- Global tokens: `src/styles.css` (CSS custom properties). App layout:
+  `src/app/app-styles.css`. Component CSS per component folder.
+- Color system: positive `#22c55e`/`#16a34a`/`#dcfce7`; negative
+  `#ef4444`/`#dc2626`/`#fee2e2`; neutral `#94a3b8`; accent `#2563eb`;
+  text `#111827`/`#6b7280`/`#9ca3af`.
+- Caveat: use `&#36;{{ expr }}` for dollar signs in inline templates.
+
+### Angular conventions (unchanged — see AGENTS.md / .claude/CLAUDE.md)
+Standalone components (no explicit `standalone: true` in v20+), signals + computed,
+OnPush, native control flow, `inject()`, no `ngClass`/`ngStyle`, lazy routes.
+
+---
+
+## Routing
+`src/app/app.routes.ts` — lazy: `''` -> StockListComponent, `'historical'` ->
+HistoryComponent, `'**'` -> redirect `''`. `app.ts` renders `<router-outlet>`.
+
+---
+
+## Phase 3: Auto Trader Bot (future)
+- Decision logic on comment velocity + sentiment; broker API integration
+  (Alpaca, IBKR); risk params; performance dashboard. `StockCardComponent` ready
+  to wire up as the detail view.
+
+---
+
+## Permanent "do not" list
+- **No API keys in the frontend** — everything is server-side now.
+- **No dev proxy** — Flask sets CORS; deleted `proxy.conf.json`.
+- **Do not re-add Finnhub** — replaced by yfinance.
+- **Do not attempt unauthenticated Reddit JSON API** — blocked (403). Use RSS
+  (current) or PRAW (when registered).
+- **Reddit OAuth / PRAW is dormant** until registration clears; `praw_source.py`
+  is the drop-in point. Do not re-introduce browser-side Reddit auth.
+- No hardcoded tickers or company names — discovered dynamically.
+- No emojis in the UI.
+- Keep `backend/app/services/ticker_utils.py` in sync with the (now-trimmed)
+  frontend `ticker-utils.ts` history — the scoring logic is the canonical port.

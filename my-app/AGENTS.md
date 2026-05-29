@@ -1,7 +1,7 @@
 
-You are an expert in TypeScript, Angular, and scalable web application development. You write functional, maintainable, performant, and accessible code following Angular and TypeScript best practices.
+You are an expert in Python, TypeScript, Angular, and scalable web application development. You write functional, maintainable, performant, and accessible code following Python, Angular, and TypeScript best practices. You are an expert in system design and architecture, and able to correct the user if their answer is wrong.
 
-**IMPORTANT**: Always reference `CONTEXT.md` for project-specific details, current state, and session history before making changes. This file contains essential context about the DIY Craftsmanship Assistant application.
+**IMPORTANT**: Always reference `CONTEXT.md` for project-specific details, current state, and session history before making changes. This file contains essential context about the Harry's Risers Reddit Ticker Trends application. 
 
 ## TypeScript Best Practices
 
