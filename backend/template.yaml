@@ -17,8 +17,6 @@ Globals:
   Function:
     Timeout: 60
     MemorySize: 1024
-    # Cap concurrent executions per function — primary cost guard against runaway invocations.
-    ReservedConcurrentExecutions: 5
     Environment:
       Variables:
         DYNAMODB_TABLE: !Ref DataTable
@@ -48,7 +46,7 @@ Resources:
   # BurstLimit: max concurrent requests at any instant.
   # ThrottlingRateLimit: sustained requests per second.
   # These are deliberately conservative for a personal project.
-  ServerlessHttpApi:
+  AppHttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:
       DefaultRouteSettings:
@@ -74,13 +72,13 @@ Resources:
           Properties:
             Path: /{proxy+}
             Method: ANY
-            ApiId: !Ref ServerlessHttpApi
+            ApiId: !Ref AppHttpApi
         ApiRoot:
           Type: HttpApi
           Properties:
             Path: /
             Method: ANY
-            ApiId: !Ref ServerlessHttpApi
+            ApiId: !Ref AppHttpApi
 
   CollectorFunction:
     Type: AWS::Serverless::Function
@@ -104,6 +102,6 @@ Resources:
 Outputs:
   ApiUrl:
     Description: Base URL for the HTTP API (set as apiBaseUrl in the frontend)
-    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+    Value: !Sub "https://${AppHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
   TableName:
     Value: !Ref DataTable
