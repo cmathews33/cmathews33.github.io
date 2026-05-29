@@ -17,6 +17,8 @@ Globals:
   Function:
     Timeout: 60
     MemorySize: 1024
+    # Cap concurrent executions per function — primary cost guard against runaway invocations.
+    ReservedConcurrentExecutions: 5
     Environment:
       Variables:
         DYNAMODB_TABLE: !Ref DataTable
@@ -42,6 +44,17 @@ Resources:
         AttributeName: ttl
         Enabled: true
 
+  # Throttled HTTP API — rate limit is per-account per-stage across all routes.
+  # BurstLimit: max concurrent requests at any instant.
+  # ThrottlingRateLimit: sustained requests per second.
+  # These are deliberately conservative for a personal project.
+  ServerlessHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+
   ApiFunction:
     Type: AWS::Serverless::Function
     Metadata:
@@ -61,11 +74,13 @@ Resources:
           Properties:
             Path: /{proxy+}
             Method: ANY
+            ApiId: !Ref ServerlessHttpApi
         ApiRoot:
           Type: HttpApi
           Properties:
             Path: /
             Method: ANY
+            ApiId: !Ref ServerlessHttpApi
 
   CollectorFunction:
     Type: AWS::Serverless::Function
