@@ -81,9 +81,11 @@ where `timestamp` is ISO 8601. Frontend `ApiService` maps it back to a `Date`.
 - `TICKER#{sym}` / `DATE#{yyyy-mm-dd}` -> `{ price, mentionCount, source, sentiment, ttl }`
   (per-ticker daily snapshot; `ttl` expires rows after ~400 days)
 
-### Merge logic (ported from old stock.service.ts)
-StockTwits fills spots first (returns ~30, usually fills all 20); RSS supplements
-any tickers not already present; capped at 20. See `collector.merge_mentions()`.
+### Merge logic
+**Reddit RSS fills first (primary signal); StockTwits supplements any gaps; capped at 20.**
+`collector.merge_mentions()` takes Reddit mentions as the first argument. StockTwits
+was previously primary but was swapped because all sources showed as `stocktwits` —
+Reddit discussion is the intended signal for this app.
 
 ### Local development
 
@@ -124,13 +126,12 @@ Verified locally (2026-05): `/api/stocks` returns 20 tickers with real yfinance
 prices; `/api/historical?period=6mo` returns real period change; CORS preflight +
 headers correct for a browser origin; 6/6 tests pass. Lambda image uses Python 3.12.
 
-### AWS deploy (pending — not run in this environment)
-Requires Docker + AWS SAM CLI + AWS credentials.
-```bash
-cd backend && sam build && sam deploy --guided
-```
-Set `CorsOrigins` to `https://cmathews33.github.io`, leave `RedditSource=rss`.
-Put the stack's `ApiUrl` output into `my-app/src/environments/environment.prod.ts`.
+### AWS deploy
+Stack `harrys-risers` deployed to `us-east-1`. See `AWSPLAN.md` for full deploy
+runbook and gotchas encountered during deploy. After any `template.yaml` change,
+run both `sam build && sam deploy` (not just `sam deploy`).
+Put the stack's `ApiUrl` output into `my-app/src/environments/environment.prod.ts`
+then rebuild and redeploy the Angular frontend (`ng build && ng deploy`).
 
 ### Gotchas discovered during development
 - **macOS system `python3` is 3.7.2** — install Python via `brew install python`
@@ -146,6 +147,34 @@ Put the stack's `ApiUrl` output into `my-app/src/environments/environment.prod.t
   caches into DynamoDB; the live hot path reads DynamoDB. Fallback option: `stooq`
   via pandas-datareader in `services/prices.py`.
 - yfinance correctly drops bad/delisted symbols (e.g. `$IRA`).
+- **RSS `num_comments` is always 0** — Reddit RSS feeds do not include comment
+  counts. `commentCount` in the API response reflects the weighted mention score
+  (weight 2 for `$TICKER`, weight 1 for bare caps) — a discussion-intensity signal,
+  not a literal comment count. Real comment counts require PRAW (OAuth).
+- **`hot.rss` not `new.rss`** — switched to hot feed so posts have real engagement
+  behind them. New posts are unvetted noise; hot posts are ranked by upvotes +
+  comment velocity.
+- **Subreddits**: `wallstreetbets`, `stocks`, `investing`, `pennystocks`,
+  `cryptocurrency` — all via `hot.rss?limit=100`.
+- **`src/environments/` removed from `my-app/.gitignore`** — was excluded when
+  environment files held secrets (Finnhub key, Reddit client ID). No secrets remain
+  there, so the files are now tracked so fresh clones can build.
+- **Easter egg**: `GET /` on the API returns an HTML page reading
+  "Herback Endsmelz - API for Harry's Risers" with links to all endpoints.
+- **Docker Desktop not required** — Colima is a lightweight alternative:
+  `brew install colima && colima start`. SAM needs `DOCKER_HOST` pointed at
+  Colima's socket: `export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"`.
+  Add that export to `~/.zshrc` to persist across sessions.
+
+### Monitoring staleness (yfinance throttling detection)
+If the collector gets throttled by Yahoo Finance it fails silently — the API keeps
+serving stale DynamoDB data rather than crashing. To check:
+1. **Quickest**: hit `/api/stocks` and inspect the `timestamp` field on any stock.
+   If all timestamps are the same and hours old during market hours, data is stale.
+2. **DynamoDB console**: Explore items, filter `pk = LIVE`, `sk = latest`.
+   The `refreshedAt` field is the last successful collector timestamp.
+3. **CloudWatch Logs**: Log group `/aws/lambda/harrys-risers-CollectorFunction-XXXX`.
+   Open the latest stream and look for `429` or request errors.
 
 ---
 

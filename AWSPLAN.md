@@ -21,9 +21,13 @@ These are already configured in `backend/template.yaml`:
 
 | Control | Setting | What it prevents |
 |---|---|---|
-| `ReservedConcurrentExecutions: 5` | Max 5 parallel Lambda invocations per function | Runaway parallel executions from a traffic spike or bug |
 | `ThrottlingBurstLimit: 20` | Max 20 concurrent API requests at any instant | Sudden floods at the API Gateway layer |
 | `ThrottlingRateLimit: 10` | Max 10 sustained requests/second | Sustained scraping or abuse |
+
+> **Note:** `ReservedConcurrentExecutions` was removed from the template. New AWS
+> accounts require at least 10 unreserved concurrent executions — setting 5 per
+> function (10 total) caused `CREATE_FAILED` on first deploy. API Gateway throttling
+> is sufficient cost protection for this project.
 
 These deploy automatically with `sam deploy` — no manual console steps needed.
 
@@ -44,12 +48,26 @@ traffic this app costs effectively $0/month (all services are free-tier eligible
 
 ## Phase 1 — Install prerequisites
 
-### 1. Docker Desktop
+### 1. Docker
 Required to build Lambda container images (yfinance pulls pandas/numpy — too large for a zip).
 
+**Option A — Docker Desktop** (requires macOS 12+):
 Download from https://www.docker.com/products/docker-desktop/
 Choose "Mac with Apple Silicon" or "Mac with Intel chip" as appropriate.
-Install and **launch Docker** — the daemon must be running before `sam build`.
+
+**Option B — Colima** (lightweight alternative, works on older macOS, confirmed working on Ventura 13.6.9):
+```bash
+brew install colima docker
+colima start
+export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
+```
+Add the `export` line to `~/.zshrc` so it persists across sessions. Run
+`colima start` once each time you restart your machine before running `sam build`.
+
+Either way, verify Docker is working before proceeding:
+```bash
+docker ps   # should return an empty list, no error
+```
 
 ### 2. AWS CLI + SAM CLI
 ```bash
@@ -92,19 +110,52 @@ sam build                 # builds Docker images for both Lambda functions
 sam deploy --guided       # first-time walkthrough; saves answers to samconfig.toml
 ```
 
+Always run `sam build` before `sam deploy` after any code or template change —
+`sam deploy` alone does not rebuild the Docker images.
+
 Parameters to set during `sam deploy --guided`:
 - **Stack name:** `harrys-risers` (or any name you like)
 - **Region:** `us-east-1` (match what you set in `aws configure`)
 - **CorsOrigins:** `https://cmathews33.github.io`
 - **RedditSource:** `rss` (default — leave as-is)
 - Allow SAM to create IAM roles: **yes**
-- Save config to samconfig.toml: **yes** (future deploys just need `sam deploy`)
+- Save config to samconfig.toml: **yes** (future deploys just need `sam build && sam deploy`)
 
 ### After deploy
 The stack outputs will print an `ApiUrl` — copy it. It looks like:
 ```
 https://abc123xyz.execute-api.us-east-1.amazonaws.com
 ```
+
+### What SAM creates in AWS
+| Resource | Where to find it in console |
+|---|---|
+| **ApiFunction** Lambda | Lambda → Functions |
+| **CollectorFunction** Lambda | Lambda → Functions |
+| **AppHttpApi** (HTTP API Gateway) | API Gateway → APIs — invoke URL = your ApiUrl |
+| **DataTable** (DynamoDB) | DynamoDB → Tables |
+| **EventBridge schedule** (rate 30 min) | EventBridge → Schedules |
+| **ECR repositories** (Docker images) | ECR → Repositories |
+| **IAM execution roles** | IAM → Roles |
+
+DynamoDB will be empty until the first CollectorFunction run (~30 min after deploy).
+
+### Deploy gotchas encountered
+- **`ServerlessHttpApi` is a reserved SAM logical ID** — causes a warning and
+  unexpected behaviour. The explicit API resource is named `AppHttpApi` in
+  `template.yaml`.
+- **`ReservedConcurrentExecutions: 5` fails on new accounts** — AWS requires
+  ≥10 unreserved executions; two functions × 5 = 10 reserved leaves 0 unreserved.
+  Removed from the template; API Gateway throttling is sufficient.
+- **`ROLLBACK_COMPLETE` stack cannot be updated** — if a deploy fails and rolls
+  back, delete the stack first before redeploying:
+  ```bash
+  aws cloudformation delete-stack --stack-name harrys-risers
+  # wait ~60s, confirm gone:
+  aws cloudformation describe-stacks --stack-name harrys-risers
+  # then:
+  sam build && sam deploy
+  ```
 
 ---
 
@@ -149,6 +200,25 @@ After the first deploy, `samconfig.toml` is saved in `backend/`. Subsequent depl
 cd backend
 sam build && sam deploy
 ```
+
+---
+
+## Monitoring and staleness detection
+
+The CollectorFunction runs every 30 minutes. If yfinance gets throttled by Yahoo
+Finance, it fails silently — the API serves stale DynamoDB data rather than crashing.
+
+**Checking for stale data (in order of speed):**
+1. Hit `/api/stocks` — inspect the `timestamp` field on any stock. If all are the
+   same and hours old during market hours, the collector is failing.
+2. **DynamoDB console** → Explore items → filter `pk = LIVE`, `sk = latest` →
+   check the `refreshedAt` field.
+3. **CloudWatch Logs** → Log groups → `/aws/lambda/harrys-risers-CollectorFunction-XXXX`
+   → open the latest stream → look for `429` or HTTP errors.
+
+The ApiFunction only runs on request — zero cost or activity when the app is idle.
+The CollectorFunction runs 48×/day regardless of traffic, well within the Lambda
+free tier (~86,400 GB-seconds/month vs. 400,000 free).
 
 ---
 
