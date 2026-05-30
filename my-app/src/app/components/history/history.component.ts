@@ -3,9 +3,8 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { HistoryService, HistoryPeriod } from '../../services/history.service';
 import { TickerHistory } from '../../services/api.service';
-import { formatSource } from '../../utils/ticker-utils';
 
-type SortOption = 'mentions' | 'change' | 'source';
+type SortOption = 'mentions' | 'change';
 
 interface HistoryRow {
   ticker: string;
@@ -13,7 +12,6 @@ interface HistoryRow {
   priceChange: number;
   percentChange: number;
   mentionCount: number;
-  source: string;
   lastDate: string;
 }
 
@@ -31,7 +29,6 @@ function toRow(th: TickerHistory): HistoryRow {
     priceChange,
     percentChange,
     mentionCount: last?.mentionCount ?? 0,
-    source:       last?.source ?? '',
     lastDate:     last?.date ?? '',
   };
 }
@@ -103,7 +100,6 @@ function toRow(th: TickerHistory): HistoryRow {
             >
               <option value="mentions">Most Mentioned</option>
               <option value="change">Top Gainers</option>
-              <option value="source">By Source</option>
             </select>
           </div>
         </div>
@@ -116,8 +112,7 @@ function toRow(th: TickerHistory): HistoryRow {
                 <th scope="col" class="col-ticker">Ticker</th>
                 <th scope="col" class="col-price">Last Price</th>
                 <th scope="col" class="col-change">{{ changeLabel() }}</th>
-                <th scope="col" class="col-subreddit">Source</th>
-                <th scope="col" class="col-mentions">Reddit Mentions</th>
+                <th scope="col" class="col-mentions">Reddit Score</th>
                 <th scope="col" class="col-time">Last Seen</th>
               </tr>
             </thead>
@@ -147,14 +142,13 @@ function toRow(th: TickerHistory): HistoryRow {
                         <span class="na">—</span>
                       }
                     </td>
-                    <td class="col-subreddit subreddit-val">{{ formatSource(row.source) }}</td>
                     <td class="col-mentions mentions-val">{{ row.mentionCount | number }}</td>
                     <td class="col-time time-val">{{ row.lastDate }}</td>
                   </tr>
                 }
               } @else {
                 <tr>
-                  <td colspan="7" class="no-results">No stocks match your search.</td>
+                  <td colspan="6" class="no-results">No stocks match your search.</td>
                 </tr>
               }
             </tbody>
@@ -174,7 +168,6 @@ function toRow(th: TickerHistory): HistoryRow {
 })
 export class HistoryComponent {
   private readonly histService = inject(HistoryService);
-  protected readonly formatSource = formatSource;
 
   readonly period    = signal<HistoryPeriod>('1mo');
   readonly searchQuery = signal('');
@@ -206,11 +199,8 @@ export class HistoryComponent {
     }
 
     return [...rows].sort((a, b) => {
-      switch (sort) {
-        case 'change':  return b.percentChange - a.percentChange;
-        case 'source':  return a.source.localeCompare(b.source);
-        default:        return b.mentionCount - a.mentionCount;
-      }
+      if (sort === 'change') return b.percentChange - a.percentChange;
+      return b.mentionCount - a.mentionCount;
     });
   });
 

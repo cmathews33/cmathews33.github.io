@@ -2,9 +2,8 @@ import { Component, ChangeDetectionStrategy, signal, computed, inject } from '@a
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { StockService } from '../../services/stock.service';
-import { formatSource } from '../../utils/ticker-utils';
 
-type SortOption = 'mentions' | 'change' | 'source';
+type SortOption = 'mentions' | 'change';
 
 @Component({
   selector: 'app-stock-list',
@@ -46,10 +45,7 @@ type SortOption = 'mentions' | 'change' | 'source';
           </div>
           <div class="refresh-stamps" aria-live="polite">
             @if (stockService.redditRefreshed(); as t) {
-              <span class="stamp">Social {{ t | date:'shortTime' }}</span>
-            }
-            @if (stockService.priceRefreshed(); as t) {
-              <span class="stamp">Prices {{ t | date:'shortTime' }}</span>
+              <span class="stamp">Refreshed {{ t | date:'shortTime' }}</span>
             }
           </div>
         </div>
@@ -78,7 +74,6 @@ type SortOption = 'mentions' | 'change' | 'source';
             >
               <option value="mentions">Most Mentioned</option>
               <option value="change">Top Gainers</option>
-              <option value="source">By Source</option>
             </select>
           </div>
         </div>
@@ -92,9 +87,8 @@ type SortOption = 'mentions' | 'change' | 'source';
                 <th scope="col" class="col-name">Company</th>
                 <th scope="col" class="col-price">Price</th>
                 <th scope="col" class="col-change">24h Change</th>
-                <th scope="col" class="col-subreddit">Source</th>
-                <th scope="col" class="col-mentions">Mentions</th>
-                <th scope="col" class="col-time">Last Post</th>
+                <th scope="col" class="col-mentions">Reddit Score</th>
+                <th scope="col" class="col-time">Reddit Post</th>
               </tr>
             </thead>
             <tbody>
@@ -124,14 +118,13 @@ type SortOption = 'mentions' | 'change' | 'source';
                         <span class="na">—</span>
                       }
                     </td>
-                    <td class="col-subreddit subreddit-val">{{ formatSource(stock.source) }}</td>
                     <td class="col-mentions mentions-val">{{ stock.mentionScore | number }}</td>
-                    <td class="col-time time-val">{{ stock.postTimestamp | date:'shortTime' }}</td>
+                    <td class="col-time time-val">{{ stock.postTimestamp | date:'MMM d, h:mm a' }}</td>
                   </tr>
                 }
               } @else {
                 <tr>
-                  <td colspan="8" class="no-results">No stocks match your search.</td>
+                  <td colspan="7" class="no-results">No stocks match your search.</td>
                 </tr>
               }
             </tbody>
@@ -140,7 +133,7 @@ type SortOption = 'mentions' | 'change' | 'source';
 
         <p class="results-count">
           Showing {{ filteredStocks().length }} of {{ totalCount() }} stocks
-          &bull; Refreshes every 30 min
+          &bull; Refreshes every 15 min during market hours
         </p>
       </div>
     }
@@ -151,7 +144,6 @@ type SortOption = 'mentions' | 'change' | 'source';
 })
 export class StockListComponent {
   readonly stockService = inject(StockService);
-  protected readonly formatSource = formatSource;
 
   readonly searchQuery = signal('');
   readonly sortBy = signal<SortOption>('mentions');
@@ -181,14 +173,8 @@ export class StockListComponent {
     }
 
     return [...stocks].sort((a, b) => {
-      switch (sort) {
-        case 'change':
-          return b.percentChange - a.percentChange;
-        case 'source':
-          return a.source.localeCompare(b.source);
-        default:
-          return b.mentionScore - a.mentionScore;
-      }
+      if (sort === 'change') return b.percentChange - a.percentChange;
+      return b.mentionScore - a.mentionScore;
     });
   });
 
