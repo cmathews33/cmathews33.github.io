@@ -11,5 +11,10 @@ export const routes: Routes = [
     loadComponent: () =>
       import('./components/history/history.component').then(m => m.HistoryComponent),
   },
+  {
+    path: 'logic',
+    loadComponent: () =>
+      import('./components/logic/logic.component').then(m => m.LogicComponent),
+  },
   { path: '**', redirectTo: '' },
 ];

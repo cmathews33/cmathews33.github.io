@@ -1,0 +1,165 @@
+<div class="page-header">
+  <div class="page-header-inner">
+    <div>
+      <h1 class="page-title">How It Works</h1>
+      <p class="page-sub">Data flow, endpoint contracts, and known limitations</p>
+    </div>
+  </div>
+</div>
+
+<div class="logic-wrapper">
+
+  <!-- Architecture -->
+  <section class="card" aria-labelledby="arch-heading">
+    <h2 id="arch-heading" class="section-title">Architecture &amp; Data Flow</h2>
+
+    <div class="flow-diagram" aria-label="Data flow diagram">
+      <div class="flow-step">
+        <span class="flow-icon" aria-hidden="true">&#128197;</span>
+        <div class="flow-text">
+          <strong>EventBridge</strong>
+          <span>Every 15 min during US market hours &bull; Hourly off-hours</span>
+        </div>
+      </div>
+      <div class="flow-arrow" aria-hidden="true">&#8595;</div>
+      <div class="flow-step">
+        <span class="flow-icon" aria-hidden="true">&#128202;</span>
+        <div class="flow-text">
+          <strong>CollectorFunction</strong>
+          <span>Reddit RSS + yfinance &rarr; DynamoDB</span>
+        </div>
+      </div>
+      <div class="flow-arrow" aria-hidden="true">&#8595;</div>
+      <div class="flow-step">
+        <span class="flow-icon" aria-hidden="true">&#127760;</span>
+        <div class="flow-text">
+          <strong>ApiFunction</strong>
+          <span>Reads DynamoDB and returns JSON &mdash; no fetching itself</span>
+        </div>
+      </div>
+      <div class="flow-arrow" aria-hidden="true">&#8595;</div>
+      <div class="flow-step">
+        <span class="flow-icon" aria-hidden="true">&#128203;</span>
+        <div class="flow-text">
+          <strong>This Frontend</strong>
+          <span>Thin client &mdash; display only</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="two-col">
+      <div class="info-block">
+        <h3 class="block-title">CollectorFunction <span class="badge badge-schedule">Scheduled</span></h3>
+        <ul class="detail-list">
+          <li>Fetches 5 subreddits via hot.rss in parallel</li>
+          <li>Scores tickers by mention weight &mdash; <code>&#36;TICKER</code> = 2 pts, bare caps = 1 pt</li>
+          <li>Batches a yfinance price call for the top 20</li>
+          <li>Writes <code>LIVE/latest</code> &mdash; the full 20-stock list + <code>refreshedAt</code></li>
+          <li>Writes <code>TICKER#sym/DATE#today</code> &mdash; daily snapshot per ticker</li>
+        </ul>
+      </div>
+      <div class="info-block">
+        <h3 class="block-title">ApiFunction <span class="badge badge-http">HTTP</span></h3>
+        <ul class="detail-list">
+          <li>Reads from DynamoDB and returns JSON</li>
+          <li>Does no data fetching itself</li>
+          <li>Zero cost when idle &mdash; only runs on request</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- /api/stocks -->
+  <section class="card" aria-labelledby="stocks-heading">
+    <h2 id="stocks-heading" class="section-title"><code>/api/stocks</code></h2>
+    <div class="code-block" role="region" aria-label="stocks response shape">
+      <pre>&#123; "stocks": [...], "refreshedAt": "2026-05-30T14:15:00+00:00" &#125;
+
+Each stock: &#123; ticker, name, price, priceChange, percentChange, mentionScore, source, postTimestamp &#125;</pre>
+    </div>
+    <dl class="field-list">
+      <div class="field-row">
+        <dt><code>refreshedAt</code></dt>
+        <dd>Timestamp of the last successful collector run. If it is more than 15 minutes old during market hours, the collector is likely failing or throttled.</dd>
+      </div>
+      <div class="field-row">
+        <dt><code>price / priceChange / percentChange</code></dt>
+        <dd>Regular market session price at collection time. Uses <code>regular_market_price</code> from yfinance &mdash; extended-hours prices are excluded to match Yahoo Finance's official day change.</dd>
+      </div>
+      <div class="field-row">
+        <dt><code>mentionScore</code></dt>
+        <dd>Weighted Reddit mention score at collection time. <code>&#36;TICKER</code> = 2 pts, bare caps = 1 pt per post. Not a comment count &mdash; RSS does not expose actual comment counts.</dd>
+      </div>
+      <div class="field-row">
+        <dt><code>postTimestamp</code></dt>
+        <dd>Time of the most recent Reddit post mentioning this ticker. A Reddit signal, not a price freshness indicator &mdash; use <code>refreshedAt</code> for that.</dd>
+      </div>
+      <div class="field-row">
+        <dt><code>sentiment</code></dt>
+        <dd>Removed. RSS always returns <code>upvote_ratio=0.5</code> so the value was always "neutral" and carried no information. Stored in DynamoDB for future NLP use.</dd>
+      </div>
+    </dl>
+  </section>
+
+  <!-- /api/historical -->
+  <section class="card" aria-labelledby="hist-heading">
+    <h2 id="hist-heading" class="section-title"><code>/api/historical?period=1mo&amp;ticker=AAPL</code></h2>
+    <div class="code-block" role="region" aria-label="historical response shape">
+      <pre>&#123; "ticker": "AAPL", "points": [&#123; "date": "2026-04-30", "price": 180.0, "mentionCount": 3, "source": "..." &#125;] &#125;</pre>
+    </div>
+    <dl class="field-list">
+      <div class="field-row">
+        <dt><code>price</code></dt>
+        <dd>Close price at the time of that collector run, or yfinance daily close if backfilled.</dd>
+      </div>
+      <div class="field-row">
+        <dt><code>mentionCount</code></dt>
+        <dd>Weighted Reddit mention score from the last collector run that day. Last-write-wins per day &mdash; not a daily aggregate.</dd>
+      </div>
+      <div class="field-row">
+        <dt><code>source</code></dt>
+        <dd><code>"backfill"</code> for seeded rows (price-only, <code>mentionCount=0</code>), or the subreddit name for live-collected rows.</dd>
+      </div>
+    </dl>
+  </section>
+
+  <!-- What data is NOT -->
+  <section class="card card-warning" aria-labelledby="notnot-heading">
+    <h2 id="notnot-heading" class="section-title">What the Data Is Not</h2>
+    <ul class="detail-list">
+      <li><strong>Not real-time prices</strong> &mdash; prices are snapshots from when the collector ran</li>
+      <li><strong>mentionCount is not a true daily total</strong> &mdash; it is the score from one sample per day</li>
+      <li><strong>Historical mention data only exists from deploy date forward</strong> &mdash; backfill gives prices but <code>mentionCount=0</code> for past dates</li>
+    </ul>
+  </section>
+
+  <!-- mentionCount in depth -->
+  <section class="card" aria-labelledby="mention-heading">
+    <h2 id="mention-heading" class="section-title">mentionCount In Depth</h2>
+
+    <h3 class="sub-heading">What mentionCount actually is</h3>
+    <p class="body-text">Each collector run scores tickers by scanning the <strong>current hot posts</strong> on Reddit at that moment. <code>&#36;TICKER</code> in a post title scores 2 points; a bare uppercase ticker scores 1 point. That score is written to <code>TICKER#sym/DATE#today</code> as <code>mentionCount</code>.</p>
+
+    <h3 class="sub-heading">The one-sample-per-day problem</h3>
+    <p class="body-text">The collector runs roughly 30+ times per day, but <code>DATE#today</code> is the same key every run. Each write overwrites the previous one:</p>
+    <div class="code-block" role="region" aria-label="overwrite example">
+      <pre>9:00am  TSLA score=8   → writes mentionCount: 8
+9:15am  TSLA score=12  → overwrites → mentionCount: 12
+9:30am  TSLA score=5   → overwrites → mentionCount: 5
+...
+4:45pm  TSLA score=9   → overwrites → mentionCount: 9  ← final value</pre>
+    </div>
+    <p class="body-text">The historical chart shows whatever the <strong>last collector run of the day captured</strong> &mdash; not a sum or average across all runs.</p>
+
+    <h3 class="sub-heading">Why this matters</h3>
+    <ul class="detail-list">
+      <li>A spike in mentions at 10am will not show up in history if it died down by the last run</li>
+      <li>A ticker that went viral briefly could look unremarkable in hindsight</li>
+      <li>The live endpoint is more accurate for current buzz &mdash; historical is a "was this ticker showing up around this date" signal</li>
+    </ul>
+
+    <h3 class="sub-heading">To fix properly (future work)</h3>
+    <p class="body-text">Accumulate a daily max or sum across runs rather than overwriting. That would require a different DynamoDB write strategy &mdash; for example, an atomic <code>ADD mentionCount :n</code> increment, or storing multiple samples and aggregating at read time.</p>
+  </section>
+
+</div>

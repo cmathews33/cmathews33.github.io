@@ -27,7 +27,13 @@ import { NgOptimizedImage } from '@angular/common';
             class="nav-link"
             [attr.aria-current]="histLink.isActive ? 'page' : null"
           >Historical</a>
-          <a href="#" class="nav-link">Watchlist</a>
+          <a
+            routerLink="/logic"
+            routerLinkActive="active"
+            #logicLink="routerLinkActive"
+            class="nav-link"
+            [attr.aria-current]="logicLink.isActive ? 'page' : null"
+          >Logic</a>
         </nav>
       </div>
     </header>
