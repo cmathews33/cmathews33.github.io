@@ -5,7 +5,7 @@ Description: Harry's Risers backend - API + scheduled collector (Lambda, API Gat
 Parameters:
   CorsOrigins:
     Type: String
-    Default: "*"
+    Default: "https://cmathews33.github.io,http://localhost:4200"
     Description: Comma-separated allowed origins (set to the GitHub Pages URL in prod)
   RedditSource:
     Type: String
