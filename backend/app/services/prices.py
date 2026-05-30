@@ -15,6 +15,7 @@ Yahoo. A stooq fallback can be added here if Yahoo blocks Lambda IPs.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 import yfinance as yf
@@ -31,14 +32,19 @@ class PriceData:
     percent_change: float
 
 
+def _fetch_name(ticker_obj, symbol: str) -> tuple[str, str]:
+    try:
+        info = ticker_obj.info
+        return symbol, info.get("shortName") or info.get("longName") or symbol
+    except Exception:  # noqa: BLE001
+        return symbol, symbol
+
+
 def get_live_prices(tickers: list[str]) -> dict[str, PriceData]:
     """Current price + 24h change for each ticker. Unknown symbols are dropped.
 
-    Uses a single batched `yf.Tickers()` download and reads `.fast_info` (cached,
-    no extra round-trip). The company name is intentionally NOT resolved here:
-    `.info` is a separate per-ticker request that adds ~N serial round-trips and
-    is throttle-prone. Name falls back to the symbol; the frontend can resolve a
-    display name if needed.
+    Prices are batched via fast_info. Names are fetched in parallel via .info
+    (one HTTP call per ticker, but concurrent) with a fallback to the symbol.
     """
     out: dict[str, PriceData] = {}
     if not tickers:
@@ -46,9 +52,16 @@ def get_live_prices(tickers: list[str]) -> dict[str, PriceData]:
 
     try:
         data = yf.Tickers(" ".join(tickers))
-    except Exception as exc:  # noqa: BLE001 - yfinance raises bare Exceptions
+    except Exception as exc:  # noqa: BLE001
         log.warning("yfinance Tickers() failed: %s", exc)
         return out
+
+    names: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futures = {ex.submit(_fetch_name, data.tickers[t], t): t for t in tickers}
+        for future in as_completed(futures, timeout=10):
+            sym, name = future.result()
+            names[sym] = name
 
     for ticker in tickers:
         try:
@@ -64,7 +77,7 @@ def get_live_prices(tickers: list[str]) -> dict[str, PriceData]:
         pct = (change / prev) * 100 if prev else 0.0
         out[ticker] = PriceData(
             ticker=ticker,
-            name=ticker,
+            name=names.get(ticker, ticker),
             price=price,
             price_change=change,
             percent_change=pct,
