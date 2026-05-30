@@ -32,11 +32,11 @@ export class StockService {
         takeUntilDestroyed()
       )
       .subscribe({
-        next: stocks => {
+        next: ({ stocks, refreshedAt }) => {
           this._stocks.set(stocks);
           this._loading.set(false);
           this._error.set(null);
-          this._refreshed.set(new Date());
+          this._refreshed.set(refreshedAt);
         },
         error: () => {
           this._loading.set(false);

@@ -31,7 +31,7 @@ import { formatSource } from '../../utils/ticker-utils';
       <div class="metrics">
         <div class="metric">
           <span class="metric-label">Mentions</span>
-          <span class="metric-value">{{ stock().commentCount | number }}</span>
+          <span class="metric-value">{{ stock().mentionScore | number }}</span>
         </div>
         <div class="metric">
           <span class="metric-label">Source</span>
@@ -39,7 +39,7 @@ import { formatSource } from '../../utils/ticker-utils';
         </div>
       </div>
 
-      <p class="timestamp">{{ stock().timestamp | date:'short' }}</p>
+      <p class="timestamp">{{ stock().postTimestamp | date:'short' }}</p>
     </article>
   `,
   styleUrls: ['./stock-card.component.css'],

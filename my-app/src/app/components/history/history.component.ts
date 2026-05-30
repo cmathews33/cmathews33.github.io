@@ -2,9 +2,39 @@ import { Component, ChangeDetectionStrategy, signal, computed, inject, effect } 
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { HistoryService, HistoryPeriod } from '../../services/history.service';
+import { TickerHistory } from '../../services/api.service';
 import { formatSource } from '../../utils/ticker-utils';
 
 type SortOption = 'mentions' | 'change' | 'source';
+
+interface HistoryRow {
+  ticker: string;
+  lastPrice: number;
+  priceChange: number;
+  percentChange: number;
+  mentionCount: number;
+  source: string;
+  lastDate: string;
+}
+
+function toRow(th: TickerHistory): HistoryRow {
+  const pts = th.points;
+  const last  = pts[pts.length - 1];
+  const first = pts[0];
+  const lastPrice   = last?.price ?? 0;
+  const firstPrice  = first?.price ?? 0;
+  const priceChange   = firstPrice > 0 ? lastPrice - firstPrice : 0;
+  const percentChange = firstPrice > 0 ? (priceChange / firstPrice) * 100 : 0;
+  return {
+    ticker:       th.ticker,
+    lastPrice,
+    priceChange,
+    percentChange,
+    mentionCount: last?.mentionCount ?? 0,
+    source:       last?.source ?? '',
+    lastDate:     last?.date ?? '',
+  };
+}
 
 @Component({
   selector: 'app-history',
@@ -13,7 +43,7 @@ type SortOption = 'mentions' | 'change' | 'source';
       <div class="page-header-inner">
         <div>
           <h1 class="page-title">Historical Trends</h1>
-          <p class="page-sub">Trending on StockTwits &amp; Reddit with historical price performance</p>
+          <p class="page-sub">Reddit trending stocks with historical price performance</p>
         </div>
         @if (state().refreshedAt; as t) {
           <span class="stamp">Refreshed {{ t | date:'shortTime' }}</span>
@@ -42,7 +72,7 @@ type SortOption = 'mentions' | 'change' | 'source';
       <div class="error-state" role="alert">
         <p>{{ state().error }}</p>
       </div>
-    } @else if (state().stocks.length === 0) {
+    } @else if (state().data.length === 0) {
       <div class="loading-state" role="status" aria-live="polite">
         <div class="spinner" aria-hidden="true"></div>
         <p>Fetching trending data&hellip;</p>
@@ -58,8 +88,8 @@ type SortOption = 'mentions' | 'change' | 'source';
               type="search"
               [ngModel]="searchQuery()"
               (ngModelChange)="searchQuery.set($event)"
-              placeholder="Search tickers or companies..."
-              aria-label="Search stocks by ticker or company name"
+              placeholder="Search tickers..."
+              aria-label="Search stocks by ticker"
               class="search-input"
             />
           </div>
@@ -84,58 +114,47 @@ type SortOption = 'mentions' | 'change' | 'source';
               <tr>
                 <th scope="col" class="col-rank">#</th>
                 <th scope="col" class="col-ticker">Ticker</th>
-                <th scope="col" class="col-name">Company</th>
-                <th scope="col" class="col-price">Price</th>
+                <th scope="col" class="col-price">Last Price</th>
                 <th scope="col" class="col-change">{{ changeLabel() }}</th>
                 <th scope="col" class="col-subreddit">Source</th>
                 <th scope="col" class="col-mentions">Reddit Mentions</th>
-                <th scope="col" class="col-time">Top Post</th>
+                <th scope="col" class="col-time">Last Seen</th>
               </tr>
             </thead>
             <tbody>
-              @if (filteredStocks().length > 0) {
-                @for (stock of filteredStocks(); track stock.ticker; let i = $index) {
+              @if (filteredRows().length > 0) {
+                @for (row of filteredRows(); track row.ticker; let i = $index) {
                   <tr class="stock-row">
                     <td class="col-rank rank-num">{{ i + 1 }}</td>
                     <td class="col-ticker">
-                      <div class="ticker-cell">
-                        <span
-                          class="ticker-dot"
-                          [class.dot-positive]="stock.sentiment === 'positive'"
-                          [class.dot-negative]="stock.sentiment === 'negative'"
-                          [class.dot-neutral]="stock.sentiment === 'neutral'"
-                          [attr.aria-label]="stock.sentiment + ' sentiment'"
-                        ></span>
-                        <span class="ticker-sym">{{ stock.ticker }}</span>
-                      </div>
+                      <span class="ticker-sym">{{ row.ticker }}</span>
                     </td>
-                    <td class="col-name company-name">{{ stock.name }}</td>
                     <td class="col-price price-val">
-                      @if (stock.price > 0) {
-                        &#36;{{ stock.price | number:'1.2-2' }}
+                      @if (row.lastPrice > 0) {
+                        &#36;{{ row.lastPrice | number:'1.2-2' }}
                       } @else {
                         <span class="na">—</span>
                       }
                     </td>
                     <td
                       class="col-change change-val"
-                      [class.positive]="stock.priceChange > 0"
-                      [class.negative]="stock.priceChange < 0"
+                      [class.positive]="row.priceChange > 0"
+                      [class.negative]="row.priceChange < 0"
                     >
-                      @if (stock.price > 0) {
-                        {{ stock.priceChange >= 0 ? '+' : '' }}{{ stock.percentChange | number:'1.2-2' }}%
+                      @if (row.lastPrice > 0) {
+                        {{ row.priceChange >= 0 ? '+' : '' }}{{ row.percentChange | number:'1.2-2' }}%
                       } @else {
                         <span class="na">—</span>
                       }
                     </td>
-                    <td class="col-subreddit subreddit-val">{{ formatSource(stock.source) }}</td>
-                    <td class="col-mentions mentions-val">{{ stock.commentCount | number }}</td>
-                    <td class="col-time time-val">{{ stock.timestamp | date:'mediumDate' }}</td>
+                    <td class="col-subreddit subreddit-val">{{ formatSource(row.source) }}</td>
+                    <td class="col-mentions mentions-val">{{ row.mentionCount | number }}</td>
+                    <td class="col-time time-val">{{ row.lastDate }}</td>
                   </tr>
                 }
               } @else {
                 <tr>
-                  <td colspan="8" class="no-results">No stocks match your search.</td>
+                  <td colspan="7" class="no-results">No stocks match your search.</td>
                 </tr>
               }
             </tbody>
@@ -143,7 +162,7 @@ type SortOption = 'mentions' | 'change' | 'source';
         </div>
 
         <p class="results-count">
-          Showing {{ filteredStocks().length }} of {{ state().stocks.length }} stocks
+          Showing {{ filteredRows().length }} of {{ state().data.length }} stocks
           &bull; Refreshes every 24 hours
         </p>
       </div>
@@ -157,9 +176,9 @@ export class HistoryComponent {
   private readonly histService = inject(HistoryService);
   protected readonly formatSource = formatSource;
 
-  readonly period = signal<HistoryPeriod>('1mo');
+  readonly period    = signal<HistoryPeriod>('1mo');
   readonly searchQuery = signal('');
-  readonly sortBy = signal<SortOption>('mentions');
+  readonly sortBy    = signal<SortOption>('mentions');
 
   readonly periods: { value: HistoryPeriod; label: string }[] = [
     { value: '1mo', label: '1 Month' },
@@ -177,22 +196,20 @@ export class HistoryComponent {
 
   readonly state = computed(() => this.histService.getState(this.period())());
 
-  readonly filteredStocks = computed(() => {
+  readonly filteredRows = computed(() => {
     const query = this.searchQuery().toLowerCase();
-    const sort = this.sortBy();
-    let stocks = this.state().stocks;
+    const sort  = this.sortBy();
+    let rows = this.state().data.map(toRow);
 
     if (query) {
-      stocks = stocks.filter(
-        s => s.ticker.toLowerCase().includes(query) || s.name.toLowerCase().includes(query)
-      );
+      rows = rows.filter(r => r.ticker.toLowerCase().includes(query));
     }
 
-    return [...stocks].sort((a, b) => {
+    return [...rows].sort((a, b) => {
       switch (sort) {
-        case 'change':    return b.percentChange - a.percentChange;
-        case 'source':    return a.source.localeCompare(b.source);
-        default:          return b.commentCount - a.commentCount;
+        case 'change':  return b.percentChange - a.percentChange;
+        case 'source':  return a.source.localeCompare(b.source);
+        default:        return b.mentionCount - a.mentionCount;
       }
     });
   });

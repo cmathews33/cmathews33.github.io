@@ -4,8 +4,7 @@ export interface Stock {
   price: number;
   priceChange: number;
   percentChange: number;
-  commentCount: number;
-  sentiment: 'positive' | 'neutral' | 'negative';
+  mentionScore: number;
   source: string;
-  timestamp: Date;
+  postTimestamp: Date;
 }

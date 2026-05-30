@@ -42,7 +42,7 @@ type SortOption = 'mentions' | 'change' | 'source';
         <div class="list-header">
           <div>
             <h2 class="list-title">Harry's Top Rising Stocks</h2>
-            <p class="list-subtitle">Trending on StockTwits &amp; Reddit</p>
+            <p class="list-subtitle">Trending on Reddit</p>
           </div>
           <div class="refresh-stamps" aria-live="polite">
             @if (stockService.redditRefreshed(); as t) {
@@ -103,16 +103,7 @@ type SortOption = 'mentions' | 'change' | 'source';
                   <tr class="stock-row">
                     <td class="col-rank rank-num">{{ i + 1 }}</td>
                     <td class="col-ticker">
-                      <div class="ticker-cell">
-                        <span
-                          class="ticker-dot"
-                          [class.dot-positive]="stock.sentiment === 'positive'"
-                          [class.dot-negative]="stock.sentiment === 'negative'"
-                          [class.dot-neutral]="stock.sentiment === 'neutral'"
-                          [attr.aria-label]="stock.sentiment + ' sentiment'"
-                        ></span>
-                        <span class="ticker-sym">{{ stock.ticker }}</span>
-                      </div>
+                      <span class="ticker-sym">{{ stock.ticker }}</span>
                     </td>
                     <td class="col-name company-name">{{ stock.name }}</td>
                     <td class="col-price price-val">
@@ -134,8 +125,8 @@ type SortOption = 'mentions' | 'change' | 'source';
                       }
                     </td>
                     <td class="col-subreddit subreddit-val">{{ formatSource(stock.source) }}</td>
-                    <td class="col-mentions mentions-val">{{ stock.commentCount | number }}</td>
-                    <td class="col-time time-val">{{ stock.timestamp | date:'shortTime' }}</td>
+                    <td class="col-mentions mentions-val">{{ stock.mentionScore | number }}</td>
+                    <td class="col-time time-val">{{ stock.postTimestamp | date:'shortTime' }}</td>
                   </tr>
                 }
               } @else {
@@ -169,7 +160,7 @@ export class StockListComponent {
     const stocks = this.stockService.stocksList();
     if (!stocks.length) return null;
     return stocks.reduce(
-      (top, s) => (s.commentCount > top.commentCount ? s : top),
+      (top, s) => (s.mentionScore > top.mentionScore ? s : top),
       stocks[0]
     );
   });
@@ -196,7 +187,7 @@ export class StockListComponent {
         case 'source':
           return a.source.localeCompare(b.source);
         default:
-          return b.commentCount - a.commentCount;
+          return b.mentionScore - a.mentionScore;
       }
     });
   });
