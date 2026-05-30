@@ -70,8 +70,15 @@ tests/               # pytest: ticker scoring + API route logic (pure, no networ
 
 ### JSON contract
 Each stock object (`Stock.to_json()`) emits:
-`{ ticker, name, price, priceChange, percentChange, commentCount, sentiment, source, timestamp }`
-where `timestamp` is ISO 8601.
+`{ ticker, name, price, priceChange, percentChange, mentionScore, source, postTimestamp }`
+where `postTimestamp` is ISO 8601 (time of the most recent Reddit post mentioning this ticker —
+not the price capture time; use the top-level `refreshedAt` for price staleness).
+`mentionScore` is the weighted Reddit mention score (`$TICKER`=2pts, bare caps=1pt); it is
+**not** a comment count — RSS does not expose comment counts.
+`sentiment` was removed: RSS always returns `upvote_ratio=0.5` → always "neutral", so the
+field was dead. It remains in DynamoDB storage as a placeholder for future NLP sentiment.
+`price`/`priceChange`/`percentChange` use `regular_market_price` (regular session only, no
+extended-hours bleed) so they match what Yahoo Finance shows as the day's official change.
 
 ### Endpoints
 - `GET /api/health` -> `{status:"ok"}`
@@ -81,7 +88,7 @@ where `timestamp` is ISO 8601.
 - `GET /api/historical?period=1mo|6mo|1yr[&ticker=SYM]` -> **accumulated daily trend
   history** read from the DynamoDB `TICKER#/DATE#` snapshots (NOT a live yfinance
   call). `period` maps to a look-back cutoff (30/182/365 days). With `ticker` it
-  returns `{ ticker, points: [{date, price, mentionCount, sentiment, source}] }`;
+  returns `{ ticker, points: [{date, price, mentionCount, source}] }`;
   without it, an array of that shape for each ticker in the LIVE snapshot. **Requires
   DynamoDB** — returns 503 if the table is unset. Run the backfill once so there is
   real price history immediately (see below).
@@ -191,7 +198,7 @@ then rebuild and redeploy the Angular frontend (`ng build && ng deploy`).
   via pandas-datareader in `services/prices.py`.
 - yfinance correctly drops bad/delisted symbols (e.g. `$IRA`).
 - **RSS `num_comments` is always 0** — Reddit RSS feeds do not include comment
-  counts. `commentCount` in the API response reflects the weighted mention score
+  counts. `mentionScore` in the API response reflects the weighted mention score
   (weight 2 for `$TICKER`, weight 1 for bare caps) — a discussion-intensity signal,
   not a literal comment count. Real comment counts require PRAW (OAuth).
 - **`hot.rss` not `new.rss`** — switched to hot feed so posts have real engagement
@@ -262,13 +269,22 @@ node_modules/.bin/ng serve      # dev server (needs backend running on :8000)
 5. **HistoryComponent** (`components/history/`) — period tabs; injects
    `HistoryService` (`getState`/`load`); `effect()` loads on tab switch.
 
-### Data Model (`src/app/models/stock.model.ts`) — unchanged
+### Data Model (`src/app/models/stock.model.ts`) — needs update when frontend reconnects
+The backend contract changed in 2026-05; the Angular model below is stale and must be
+updated before the frontend is rewired:
 ```typescript
+// OLD (stale):
 interface Stock {
   ticker: string; name: string; price: number; priceChange: number;
   percentChange: number; commentCount: number;
   sentiment: 'positive' | 'neutral' | 'negative';
   source: string; timestamp: Date;
+}
+// NEW contract from backend:
+interface Stock {
+  ticker: string; name: string; price: number; priceChange: number;
+  percentChange: number; mentionScore: number;
+  source: string; postTimestamp: Date;
 }
 ```
 

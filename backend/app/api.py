@@ -108,7 +108,6 @@ def _history_payload(ticker: str, rows: list[dict]) -> dict:
                 "date": date,
                 "price": r.get("price"),
                 "mentionCount": r.get("mentionCount", 0),
-                "sentiment": r.get("sentiment", "neutral"),
                 "source": r.get("source", ""),
             }
         )

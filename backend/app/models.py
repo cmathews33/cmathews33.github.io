@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal
 
-Sentiment = Literal["positive", "neutral", "negative"]
+Sentiment = Literal["positive", "neutral", "negative"]  # used by TickerMention / ticker_utils
 
 
 @dataclass
@@ -38,15 +38,12 @@ class TickerMention:
 
 @dataclass
 class Stock:
-    """Mirror of the Angular `Stock` interface."""
-
     ticker: str
     name: str
     price: float
     price_change: float
     percent_change: float
-    comment_count: int
-    sentiment: Sentiment
+    mention_score: int
     source: str
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -57,9 +54,7 @@ class Stock:
             "price": self.price,
             "priceChange": self.price_change,
             "percentChange": self.percent_change,
-            "commentCount": self.comment_count,
-            "sentiment": self.sentiment,
+            "mentionScore": self.mention_score,
             "source": self.source,
-            # ISO 8601 — `new Date(string)` parses this directly on the frontend.
-            "timestamp": self.timestamp.astimezone(timezone.utc).isoformat(),
+            "postTimestamp": self.timestamp.astimezone(timezone.utc).isoformat(),
         }

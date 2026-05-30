@@ -24,8 +24,7 @@ def _assemble(mentions: list[TickerMention], price_map) -> list[Stock]:
                 price=p.price if p else 0.0,
                 price_change=p.price_change if p else 0.0,
                 percent_change=p.percent_change if p else 0.0,
-                comment_count=m.mention_count,
-                sentiment=m.sentiment,
+                mention_score=m.mention_count,
                 source=m.source,
                 timestamp=m.latest_post_time,
             )

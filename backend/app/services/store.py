@@ -98,7 +98,7 @@ def put_snapshots(stocks: list[Stock]) -> None:
                         "pk": f"TICKER#{s.ticker}",
                         "sk": f"DATE#{date}",
                         "price": s.price,
-                        "mentionCount": s.comment_count,
+                        "mentionCount": s.mention_score,
                         "source": s.source,
                         "sentiment": s.sentiment,
                         "ttl": ttl,

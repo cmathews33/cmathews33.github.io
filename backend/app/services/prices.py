@@ -53,8 +53,10 @@ def get_live_prices(tickers: list[str]) -> dict[str, PriceData]:
     for ticker in tickers:
         try:
             info = data.tickers[ticker].fast_info
-            price = float(info.last_price)
-            prev = float(info.previous_close)
+            # regular_market_price = official session price (excludes extended hours),
+            # matching what Yahoo Finance shows as the day's % change.
+            price = float(info.regular_market_price or info.last_price)
+            prev = float(info.regular_market_previous_close or info.previous_close)
         except Exception as exc:  # noqa: BLE001
             log.debug("No live price for %s: %s", ticker, exc)
             continue

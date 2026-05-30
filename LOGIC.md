@@ -11,7 +11,7 @@ Two Lambda functions:
 - Fetches 5 Reddit subreddits (hot.rss, parallel) → scores/ranks tickers by mention weight → batches a yfinance price call for the top 20
 - Writes two things to DynamoDB:
   1. `LIVE/latest` — the full 20-stock list + `refreshedAt` timestamp (overwrites previous)
-  2. `TICKER#{sym}/DATE#{today}` — a daily snapshot per ticker (price, mention count, sentiment)
+  2. `TICKER#{sym}/DATE#{today}` — a daily snapshot per ticker (price, mentionCount, sentiment, source). `sentiment` is stored but not returned by the API — RSS always produces "neutral" so it carries no information until a real NLP signal is added
 
 **ApiFunction** (HTTP, on-demand):
 - Just reads from DynamoDB and returns JSON — does **no data fetching itself**
@@ -24,16 +24,21 @@ Two Lambda functions:
 { "stocks": [...], "refreshedAt": "2026-05-30T14:15:00+00:00" }
 ```
 
+Each stock object shape: `{ ticker, name, price, priceChange, percentChange, mentionScore, source, postTimestamp }`
+
 - Reads the `LIVE/latest` DynamoDB item directly
-- **`refreshedAt`** = the timestamp of the last successful collector run. If it's >15 min old during market hours, the collector is failing or stale
-- The `price`, `priceChange`, `percentChange` on each stock reflect prices **at the time the collector last ran** — not real-time
+- **`refreshedAt`** = timestamp of the last successful collector run. If it's >15 min old during market hours, the collector is failing or stale
+- **`price`** / **`priceChange`** / **`percentChange`** = regular market session price at the time the collector ran. Uses `regular_market_price` from yfinance — extended-hours prices are excluded, so these match Yahoo Finance's official day change
+- **`mentionScore`** = weighted Reddit mention score at collection time (`$TICKER`=2pts, bare caps=1pt per post). Not a comment count — RSS does not expose actual comment counts
+- **`postTimestamp`** = time of the most recent Reddit post mentioning this ticker. This is a Reddit signal, not a price freshness indicator — use top-level `refreshedAt` for that
+- **`sentiment`** was removed: RSS always returns `upvote_ratio=0.5` → always "neutral". The field is stored in DynamoDB for future NLP use but is not exposed in the API
 
 ---
 
 ### `/api/historical?period=1mo&ticker=AAPL`
 
 ```json
-{ "ticker": "AAPL", "points": [{ "date": "2026-04-30", "price": 180.0, "mentionCount": 3, "sentiment": "neutral", "source": "..." }] }
+{ "ticker": "AAPL", "points": [{ "date": "2026-04-30", "price": 180.0, "mentionCount": 3, "source": "..." }] }
 ```
 
 - Reads the `TICKER#AAPL/DATE#*` rows from DynamoDB, filtered to the last 30/182/365 days
