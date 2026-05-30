@@ -94,10 +94,20 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref DataTable
       Events:
-        Schedule:
+        # Fresh data when it matters: every 15 min during US market hours on
+        # weekdays. Times are interpreted in America/New_York (handles DST).
+        MarketHours:
           Type: ScheduleV2
           Properties:
-            ScheduleExpression: rate(30 minutes)
+            ScheduleExpression: cron(0/15 9-16 ? * MON-FRI *)
+            ScheduleExpressionTimezone: America/New_York
+        # Low-cadence heartbeat the rest of the time (off-hours + weekends) so
+        # the snapshot never goes badly stale. Hourly, all week.
+        OffHours:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: cron(0 * ? * * *)
+            ScheduleExpressionTimezone: America/New_York
 
 Outputs:
   ApiUrl:

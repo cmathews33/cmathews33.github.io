@@ -76,7 +76,7 @@ def build_mention_data(
     total_comments = sum(p.num_comments for p in posts)
     # Use weighted score when available (Reddit RSS has no num_comments, so
     # score — reflecting $TICKER weight=2 + bare-caps weight=1 — is the best
-    # signal of discussion intensity). Fall back to post count for StockTwits.
+    # signal of discussion intensity). Fall back to post count otherwise.
     mention_count = score if score is not None else len(posts)
     avg_ratio = (
         sum(p.upvote_ratio for p in posts) / len(posts) if posts else 0.5

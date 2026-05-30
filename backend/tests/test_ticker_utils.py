@@ -1,8 +1,4 @@
-from datetime import datetime, timezone
-
 from app.models import RedditPost
-from app.services.collector import merge_mentions
-from app.models import TickerMention
 from app.services.ticker_utils import (
     build_mention_data,
     extract_tickers,
@@ -45,15 +41,3 @@ def test_build_mention_data_sentiment_thresholds():
     assert pos.sentiment == "positive"
     assert neu.sentiment == "neutral"
     assert neg.sentiment == "negative"
-
-
-def test_merge_stocktwits_first_then_reddit_gaps():
-    now = datetime.now(timezone.utc)
-    st = [TickerMention("AAA", 5, 0, "neutral", now, "stocktwits")]
-    rd = [
-        TickerMention("AAA", 2, 0, "neutral", now, "stocks"),  # dup, dropped
-        TickerMention("BBB", 3, 0, "neutral", now, "stocks"),  # gap, kept
-    ]
-    merged = merge_mentions(st, rd, limit=20)
-    assert [m.ticker for m in merged] == ["AAA", "BBB"]
-    assert merged[0].source == "stocktwits"

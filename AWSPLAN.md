@@ -3,13 +3,15 @@
 ## Architecture recap
 
 ```
-EventBridge (rate 30 min) -> CollectorFunction (Lambda) -> Reddit RSS + StockTwits + yfinance -> DynamoDB
-API Gateway -> ApiFunction (Lambda, Flask) -> DynamoDB / yfinance -> JSON
+EventBridge (15 min during US market hours, hourly otherwise)
+  -> CollectorFunction (Lambda) -> Reddit RSS + yfinance -> DynamoDB (live + daily history)
+API Gateway -> ApiFunction (Lambda, Flask) -> DynamoDB (live + accumulated history) -> JSON
 Angular (GitHub Pages) <- GET /api/stocks, GET /api/historical
 ```
 
-Two Lambda container image functions, one HTTP API Gateway, one DynamoDB table, one EventBridge schedule.
-All infrastructure is defined in `backend/template.yaml` (AWS SAM).
+Two Lambda container image functions, one HTTP API Gateway, one DynamoDB table, two
+EventBridge schedules (market-hours + off-hours). All infrastructure is defined in
+`backend/template.yaml` (AWS SAM).
 
 ---
 
@@ -134,11 +136,24 @@ https://abc123xyz.execute-api.us-east-1.amazonaws.com
 | **CollectorFunction** Lambda | Lambda → Functions |
 | **AppHttpApi** (HTTP API Gateway) | API Gateway → APIs — invoke URL = your ApiUrl |
 | **DataTable** (DynamoDB) | DynamoDB → Tables |
-| **EventBridge schedule** (rate 30 min) | EventBridge → Schedules |
+| **EventBridge schedules** (market-hours 15 min + off-hours hourly) | EventBridge → Schedules |
 | **ECR repositories** (Docker images) | ECR → Repositories |
 | **IAM execution roles** | IAM → Roles |
 
-DynamoDB will be empty until the first CollectorFunction run (~30 min after deploy).
+DynamoDB will be empty until the first CollectorFunction run (within 15 min during
+market hours, otherwise within the hour).
+
+### Seed historical price history (run once after the first deploy)
+`/api/historical` reads accumulated daily snapshots, which only grow going forward.
+Backfill ~1y of real daily prices so the historical view works immediately:
+```bash
+cd backend
+DYNAMODB_TABLE=harrys-risers AWS_DEFAULT_REGION=us-east-1 \
+  .venv/bin/python -m scripts.backfill_history
+```
+(Uses your AWS credentials to write directly to the deployed table. Omit
+`DYNAMODB_ENDPOINT` to target real AWS.) Mention/sentiment history then accumulates
+from each scheduled collector run.
 
 ### Deploy gotchas encountered
 - **`ServerlessHttpApi` is a reserved SAM logical ID** — causes a warning and
@@ -205,20 +220,21 @@ sam build && sam deploy
 
 ## Monitoring and staleness detection
 
-The CollectorFunction runs every 30 minutes. If yfinance gets throttled by Yahoo
-Finance, it fails silently — the API serves stale DynamoDB data rather than crashing.
+The CollectorFunction runs every 15 min during US market hours (hourly otherwise).
+If yfinance gets throttled by Yahoo Finance, it fails silently — the API serves
+stale DynamoDB data rather than crashing.
 
 **Checking for stale data (in order of speed):**
-1. Hit `/api/stocks` — inspect the `timestamp` field on any stock. If all are the
-   same and hours old during market hours, the collector is failing.
+1. Hit `/api/stocks` — inspect the top-level `refreshedAt` field. If it is hours old
+   during market hours, the collector is failing.
 2. **DynamoDB console** → Explore items → filter `pk = LIVE`, `sk = latest` →
    check the `refreshedAt` field.
 3. **CloudWatch Logs** → Log groups → `/aws/lambda/harrys-risers-CollectorFunction-XXXX`
    → open the latest stream → look for `429` or HTTP errors.
 
 The ApiFunction only runs on request — zero cost or activity when the app is idle.
-The CollectorFunction runs 48×/day regardless of traffic, well within the Lambda
-free tier (~86,400 GB-seconds/month vs. 400,000 free).
+The CollectorFunction runs ~15×/day off-hours plus every 15 min during market hours
+(~30 weekday market-hours runs), well within the Lambda free tier.
 
 ---
 

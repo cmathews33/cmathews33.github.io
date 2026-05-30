@@ -5,7 +5,8 @@ Single table, PK/SK design:
   * TICKER#{sym} / DATE#{yyyy-mm-dd} -> daily snapshot for accumulated trend history
 
 Reads raise if DYNAMODB_TABLE is unset, so the API falls back to computing live
-in local dev (see app/api.py).
+in local dev (see app/api.py). Set DYNAMODB_ENDPOINT to point boto3 at a local
+DynamoDB (amazon/dynamodb-local) for full-flow local testing without AWS.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import boto3
+from boto3.dynamodb.conditions import Key
 
 from app.models import Stock
 
@@ -27,7 +29,10 @@ def _table():
     name = os.environ.get("DYNAMODB_TABLE")
     if not name:
         raise RuntimeError("DYNAMODB_TABLE not configured")
-    return boto3.resource("dynamodb").Table(name)
+    # DYNAMODB_ENDPOINT lets local dev target amazon/dynamodb-local.
+    endpoint = os.environ.get("DYNAMODB_ENDPOINT")
+    kwargs = {"endpoint_url": endpoint} if endpoint else {}
+    return boto3.resource("dynamodb", **kwargs).Table(name)
 
 
 def _to_decimal(obj):
@@ -51,13 +56,16 @@ def _from_decimal(obj):
     return obj
 
 
-def get_live() -> list[dict] | None:
-    """Return the cached live stock list (frontend JSON), or None if absent."""
+def get_live() -> dict | None:
+    """Return the cached live snapshot `{stocks, refreshedAt}`, or None if absent."""
     resp = _table().get_item(Key={"pk": _LIVE_PK, "sk": _LIVE_SK})
     item = resp.get("Item")
     if not item:
         return None
-    return _from_decimal(item.get("stocks", []))
+    return {
+        "stocks": _from_decimal(item.get("stocks", [])),
+        "refreshedAt": item.get("refreshedAt"),
+    }
 
 
 def put_live(stocks: list[Stock]) -> None:
@@ -99,12 +107,51 @@ def put_snapshots(stocks: list[Stock]) -> None:
             )
 
 
-def query_ticker_history(ticker: str, limit: int = 400) -> list[dict]:
+def put_history_rows(rows: list[dict]) -> None:
+    """Bulk-write daily history rows (used by the cold-start backfill).
+
+    Each row: {ticker, date(yyyy-mm-dd), price, mentionCount?, sentiment?, source?}.
+    Existing rows for the same ticker/date are overwritten (so a later live
+    collector run replaces a backfilled price-only row with real mention data).
+    """
+    table = _table()
+    ttl = int(datetime.now(timezone.utc).timestamp()) + _SNAPSHOT_TTL_DAYS * 86400
+    with table.batch_writer() as batch:
+        for r in rows:
+            batch.put_item(
+                Item=_to_decimal(
+                    {
+                        "pk": f"TICKER#{r['ticker']}",
+                        "sk": f"DATE#{r['date']}",
+                        "price": r["price"],
+                        "mentionCount": r.get("mentionCount", 0),
+                        "source": r.get("source", "backfill"),
+                        "sentiment": r.get("sentiment", "neutral"),
+                        "ttl": ttl,
+                    }
+                )
+            )
+
+
+def query_ticker_history(ticker: str, since: str | None = None, limit: int = 400) -> list[dict]:
+    """Daily history rows for one ticker, oldest first.
+
+    `since` (yyyy-mm-dd) filters to rows on or after that date — ISO dates sort
+    lexicographically, so the `DATE#` sort key range query is exact.
+    """
+    key = Key("pk").eq(f"TICKER#{ticker}")
+    if since:
+        key = key & Key("sk").gte(f"DATE#{since}")
     resp = _table().query(
-        KeyConditionExpression=(
-            boto3.dynamodb.conditions.Key("pk").eq(f"TICKER#{ticker}")
-        ),
+        KeyConditionExpression=key,
         ScanIndexForward=True,
         Limit=limit,
     )
     return _from_decimal(resp.get("Items", []))
+
+
+def query_histories(
+    tickers: list[str], since: str | None = None, limit: int = 400
+) -> dict[str, list[dict]]:
+    """Daily history rows for many tickers: {ticker: [rows...]}."""
+    return {t: query_ticker_history(t, since=since, limit=limit) for t in tickers}

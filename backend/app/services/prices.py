@@ -1,13 +1,16 @@
 """Price data via yfinance — replaces Finnhub (no API key needed).
 
 Two jobs:
-  * live quotes (current price, 24h change) for the live ticker list
-  * period change (1mo / 6mo / 1yr) for the historical tab, computed from the
-    real historical close — no waiting for snapshots to accumulate.
+  * live quotes (current price, 24h change) for the live ticker list — batched.
+  * daily close history (for the one-time cold-start backfill into DynamoDB).
 
-Risk: Yahoo throttles shared cloud IPs. The collector calls this on a schedule
-(not per request) and results are cached in DynamoDB, so the hot path rarely
-hits Yahoo. A stooq fallback can be added here if Yahoo blocks Lambda IPs.
+The historical TAB is no longer priced here: trend history is served from the
+accumulated DynamoDB snapshots (see app/services/store.py + app/api.py). yfinance
+is only used live (batched) and for the offline backfill.
+
+Risk: Yahoo throttles shared cloud IPs. The collector calls the live path on a
+schedule (not per request) and caches into DynamoDB, so the hot path rarely hits
+Yahoo. A stooq fallback can be added here if Yahoo blocks Lambda IPs.
 """
 from __future__ import annotations
 
@@ -17,9 +20,6 @@ from dataclasses import dataclass
 import yfinance as yf
 
 log = logging.getLogger(__name__)
-
-# Maps the frontend HistoryPeriod values to yfinance period strings.
-PERIOD_MAP = {"1mo": "1mo", "6mo": "6mo", "1yr": "1y"}
 
 
 @dataclass
@@ -32,7 +32,14 @@ class PriceData:
 
 
 def get_live_prices(tickers: list[str]) -> dict[str, PriceData]:
-    """Current price + 24h change for each ticker. Unknown symbols are dropped."""
+    """Current price + 24h change for each ticker. Unknown symbols are dropped.
+
+    Uses a single batched `yf.Tickers()` download and reads `.fast_info` (cached,
+    no extra round-trip). The company name is intentionally NOT resolved here:
+    `.info` is a separate per-ticker request that adds ~N serial round-trips and
+    is throttle-prone. Name falls back to the symbol; the frontend can resolve a
+    display name if needed.
+    """
     out: dict[str, PriceData] = {}
     if not tickers:
         return out
@@ -57,7 +64,7 @@ def get_live_prices(tickers: list[str]) -> dict[str, PriceData]:
         pct = (change / prev) * 100 if prev else 0.0
         out[ticker] = PriceData(
             ticker=ticker,
-            name=_safe_name(data.tickers[ticker], ticker),
+            name=ticker,
             price=price,
             price_change=change,
             percent_change=pct,
@@ -65,41 +72,36 @@ def get_live_prices(tickers: list[str]) -> dict[str, PriceData]:
     return out
 
 
-def get_period_prices(tickers: list[str], period: str) -> dict[str, PriceData]:
-    """Period change from period-start close to latest close, per ticker."""
-    out: dict[str, PriceData] = {}
-    yf_period = PERIOD_MAP.get(period)
-    if not yf_period or not tickers:
+def get_daily_closes(tickers: list[str], period: str = "1y") -> dict[str, list[tuple[str, float]]]:
+    """Daily (date, close) series per ticker — for the cold-start backfill.
+
+    Batched + threaded via `yf.download`. Returns {ticker: [(yyyy-mm-dd, close)]}.
+    """
+    out: dict[str, list[tuple[str, float]]] = {}
+    if not tickers:
+        return out
+
+    try:
+        df = yf.download(
+            tickers,
+            period=period,
+            group_by="ticker",
+            auto_adjust=True,
+            progress=False,
+            threads=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("yfinance download failed: %s", exc)
         return out
 
     for ticker in tickers:
         try:
-            t = yf.Ticker(ticker)
-            hist = t.history(period=yf_period)
-            if hist.empty:
-                continue
-            start = float(hist["Close"].iloc[0])
-            latest = float(hist["Close"].iloc[-1])
+            closes = df["Close"] if len(tickers) == 1 else df[ticker]["Close"]
+            series = closes.dropna()
+            out[ticker] = [
+                (idx.strftime("%Y-%m-%d"), float(val)) for idx, val in series.items()
+            ]
         except Exception as exc:  # noqa: BLE001
-            log.debug("No period history for %s: %s", ticker, exc)
+            log.debug("No daily history for %s: %s", ticker, exc)
             continue
-        if not start or not latest:
-            continue
-        change = latest - start
-        pct = (change / start) * 100 if start else 0.0
-        out[ticker] = PriceData(
-            ticker=ticker,
-            name=_safe_name(t, ticker),
-            price=latest,
-            price_change=change,
-            percent_change=pct,
-        )
     return out
-
-
-def _safe_name(ticker_obj, fallback: str) -> str:
-    try:
-        info = ticker_obj.info
-        return info.get("shortName") or info.get("longName") or fallback
-    except Exception:  # noqa: BLE001
-        return fallback

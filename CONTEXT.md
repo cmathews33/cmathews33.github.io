@@ -1,7 +1,7 @@
 # Harry's Risers: Social Media's Top Rising Stocks
 
 ## Project Overview
-A web application that surfaces trending stock tickers from StockTwits and Reddit,
+A web application that surfaces trending stock tickers from Reddit,
 displaying them with price data and social metrics.
 
 **As of the 2026-05 re-architecture, the app is split into a Python backend and a
@@ -20,12 +20,15 @@ accumulation. All data-gathering now happens server-side.
 ## Current Architecture (post 2026-05 re-architecture)
 
 ```
-EventBridge (rate 30 min)
-   -> CollectorFunction (Lambda) -> Reddit RSS + StockTwits + yfinance -> DynamoDB
+EventBridge (market-hours cron: 15 min during US market hours, hourly otherwise)
+   -> CollectorFunction (Lambda) -> Reddit RSS + yfinance -> DynamoDB (live snapshot + daily history)
 API Gateway (HTTP API)
-   -> ApiFunction (Lambda, Flask) -> DynamoDB (live) / yfinance (historical) -> JSON
+   -> ApiFunction (Lambda, Flask) -> DynamoDB (live snapshot + accumulated history) -> JSON
 Angular (GitHub Pages, thin client) -> GET /api/stocks, GET /api/historical
 ```
+
+**StockTwits was removed (2026-05).** Reddit discussion is the intended signal and
+StockTwits added nothing that Reddit + yfinance don't already cover.
 
 **Key decisions (made with the user):**
 - **Backend:** Python + Flask. Lives in `backend/` at the repo root.
@@ -52,40 +55,58 @@ app/
     rss.py           # RSSRedditSource (DEFAULT) — feedparser over /r/{sub}/new.rss
     praw_source.py   # stub, NotImplementedError until registration clears
   services/
-    stocktwits.py    # GET api.stocktwits.com/.../trending/symbols.json (needs browser UA — see below)
-    prices.py        # yfinance: get_live_prices(), get_period_prices(period)
+    prices.py        # yfinance: get_live_prices() (batched), get_daily_closes() (backfill)
     ticker_utils.py  # PORT of frontend ticker-utils.ts (extract/score/build_mention_data)
-    collector.py     # merge_mentions() + collect_live() + collect_historical(period)
-    store.py         # DynamoDB boto3: get_live/put_live/put_snapshots/query_ticker_history
-template.yaml        # SAM: DataTable, ApiFunction(HttpApi), CollectorFunction(ScheduleV2 30min)
+    collector.py     # collect_live() — Reddit mentions + live prices
+    store.py         # DynamoDB boto3: get_live/put_live/put_snapshots/put_history_rows/query_ticker_history/query_histories
+scripts/
+  backfill_history.py # one-time cold-start: seed daily price history from yfinance
+template.yaml        # SAM: DataTable, ApiFunction(HttpApi), CollectorFunction(market-hours + off-hours ScheduleV2)
 Dockerfile           # public.ecr.aws/lambda/python:3.12 image for both Lambdas
 requirements.txt     # flask, flask-cors, apig-wsgi, boto3, requests, feedparser, yfinance
 README.md            # local run + SAM deploy instructions
-tests/               # pytest: ticker scoring + merge logic (pure, no network)
+tests/               # pytest: ticker scoring + API route logic (pure, no network)
 ```
 
-### JSON contract (matches the Angular `Stock` interface)
-`Stock.to_json()` emits:
+### JSON contract
+Each stock object (`Stock.to_json()`) emits:
 `{ ticker, name, price, priceChange, percentChange, commentCount, sentiment, source, timestamp }`
-where `timestamp` is ISO 8601. Frontend `ApiService` maps it back to a `Date`.
+where `timestamp` is ISO 8601.
 
 ### Endpoints
 - `GET /api/health` -> `{status:"ok"}`
-- `GET /api/stocks` -> live list. Serves DynamoDB `LIVE/latest` if `DYNAMODB_TABLE`
-  is set; otherwise (local dev) computes live on demand via `collector.collect_live()`.
-- `GET /api/historical?period=1mo|6mo|1yr` -> period price change from yfinance
-  history (real history immediately — DynamoDB accumulates *mention* history over time).
+- `GET /api/stocks` -> `{ stocks: [...], refreshedAt }`. Serves DynamoDB `LIVE/latest`
+  if `DYNAMODB_TABLE` is set; otherwise (local dev) computes live on demand via
+  `collector.collect_live()` (wrapping with a fresh `refreshedAt`).
+- `GET /api/historical?period=1mo|6mo|1yr[&ticker=SYM]` -> **accumulated daily trend
+  history** read from the DynamoDB `TICKER#/DATE#` snapshots (NOT a live yfinance
+  call). `period` maps to a look-back cutoff (30/182/365 days). With `ticker` it
+  returns `{ ticker, points: [{date, price, mentionCount, sentiment, source}] }`;
+  without it, an array of that shape for each ticker in the LIVE snapshot. **Requires
+  DynamoDB** — returns 503 if the table is unset. Run the backfill once so there is
+  real price history immediately (see below).
 
 ### DynamoDB schema (single table, PK/SK)
 - `LIVE` / `latest` -> `{ stocks: [...], refreshedAt }` (the cached live snapshot)
 - `TICKER#{sym}` / `DATE#{yyyy-mm-dd}` -> `{ price, mentionCount, source, sentiment, ttl }`
-  (per-ticker daily snapshot; `ttl` expires rows after ~400 days)
+  (per-ticker daily snapshot; `ttl` expires rows after ~400 days). Written by the
+  collector each run AND seeded by `scripts/backfill_history.py`; read by
+  `/api/historical` via `store.query_ticker_history` / `query_histories`.
 
-### Merge logic
-**Reddit RSS fills first (primary signal); StockTwits supplements any gaps; capped at 20.**
-`collector.merge_mentions()` takes Reddit mentions as the first argument. StockTwits
-was previously primary but was swapped because all sources showed as `stocktwits` —
-Reddit discussion is the intended signal for this app.
+### Ticker selection
+**Reddit RSS is the single source**, capped at 20 by weighted mention score
+(`$TICKER` weight 2, bare caps weight 1). StockTwits was removed — Reddit discussion
+is the intended signal and StockTwits added nothing yfinance/Reddit didn't cover.
+
+### Cold-start backfill
+Accumulated snapshots only grow going forward, so a fresh table has almost no
+history. `scripts/backfill_history.py` pulls ~1y of daily closes from yfinance
+(batched via `prices.get_daily_closes`) and writes price-only `TICKER#/DATE#` rows
+(`mentionCount=0`, `source="backfill"`). The scheduled collector then overwrites
+*today's* row with real mention data. Run once after deploy:
+```bash
+DYNAMODB_TABLE=harrys-risers .venv/bin/python -m scripts.backfill_history
+```
 
 ### Local development
 
@@ -108,13 +129,33 @@ python3 -m venv .venv
 **Hit the endpoints** (second terminal):
 ```bash
 curl http://localhost:8000/api/health
-curl http://localhost:8000/api/stocks
-curl "http://localhost:8000/api/historical?period=1mo"
-curl "http://localhost:8000/api/historical?period=6mo"
-curl "http://localhost:8000/api/historical?period=1yr"
+curl http://localhost:8000/api/stocks        # {stocks, refreshedAt}; computes live without a table
 
 # Pretty-print
 curl http://localhost:8000/api/stocks | python3 -m json.tool
+```
+
+**Historical needs DynamoDB** (it reads accumulated snapshots, not yfinance). For a
+full local flow use DynamoDB Local:
+```bash
+# 1. Start a local DynamoDB (Docker/Colima)
+docker run -d --rm -p 8001:8000 --name ddblocal amazon/dynamodb-local
+
+# 2. Point the app at it + create the table (once)
+export AWS_ACCESS_KEY_ID=fake AWS_SECRET_ACCESS_KEY=fake AWS_DEFAULT_REGION=us-east-1
+export DYNAMODB_TABLE=harrys-risers DYNAMODB_ENDPOINT=http://localhost:8001
+aws dynamodb create-table --endpoint-url http://localhost:8001 \
+  --table-name harrys-risers --billing-mode PAY_PER_REQUEST \
+  --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=S \
+  --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE
+
+# 3. Seed price history, then run the collector once for a live snapshot
+.venv/bin/python -m scripts.backfill_history
+.venv/bin/python -c "from app.services import collector, store; s=collector.collect_live(); store.put_live(s); store.put_snapshots(s)"
+
+# 4. Start Flask with the same env, then:
+curl "http://localhost:8000/api/historical?period=1mo"
+curl "http://localhost:8000/api/historical?ticker=AAPL&period=6mo"
 ```
 
 **Run tests:**
@@ -138,10 +179,12 @@ then rebuild and redeploy the Angular frontend (`ng build && ng deploy`).
   before running `python3 -m venv .venv`.
 - **macOS occupies port 5000** (AirPlay Receiver) — always use `--port 8000`.
   `environment.ts` `apiBaseUrl` points at `http://localhost:8000`.
-- **StockTwits returns 403 to server/cloud IPs without a browser `User-Agent`**
-  (worked before only because the dev proxy hid this). A browser UA + `Accept:
-  application/json` is set in `services/stocktwits.py`. Confirmed: no-UA -> 403,
-  browser-UA -> 200 (30 symbols).
+- **Reddit RSS subreddits are fetched concurrently** (ThreadPoolExecutor in
+  `sources/rss.py`) — the 5 feeds are independent I/O, so this collapses ~5x
+  sequential latency into roughly one request.
+- **yfinance live prices are batched** via `yf.Tickers()`; `get_live_prices` no
+  longer calls `.info` per ticker (that was a hidden per-ticker round-trip). The
+  display `name` falls back to the ticker symbol on the hot path.
 - **yfinance** can be throttled on shared Lambda IPs (server-side, different from
   the old browser CORS rejection). Mitigation: collector runs on a schedule and
   caches into DynamoDB; the live hot path reads DynamoDB. Fallback option: `stooq`
@@ -155,7 +198,10 @@ then rebuild and redeploy the Angular frontend (`ng build && ng deploy`).
   behind them. New posts are unvetted noise; hot posts are ranked by upvotes +
   comment velocity.
 - **Subreddits**: `wallstreetbets`, `stocks`, `investing`, `pennystocks`,
-  `cryptocurrency` — all via `hot.rss?limit=100`.
+  `cryptocurrency` — all via `hot.rss?limit=100`, fetched in parallel.
+- **Refresh cadence**: the collector runs every **15 min during US market hours**
+  (weekdays) and **hourly otherwise** via two `ScheduleV2` cron schedules in
+  `template.yaml` (timezone `America/New_York`, so DST is handled).
 - **`src/environments/` removed from `my-app/.gitignore`** — was excluded when
   environment files held secrets (Finnhub key, Reddit client ID). No secrets remain
   there, so the files are now tracked so fresh clones can build.
@@ -169,8 +215,8 @@ then rebuild and redeploy the Angular frontend (`ng build && ng deploy`).
 ### Monitoring staleness (yfinance throttling detection)
 If the collector gets throttled by Yahoo Finance it fails silently — the API keeps
 serving stale DynamoDB data rather than crashing. To check:
-1. **Quickest**: hit `/api/stocks` and inspect the `timestamp` field on any stock.
-   If all timestamps are the same and hours old during market hours, data is stale.
+1. **Quickest**: hit `/api/stocks` and inspect the top-level `refreshedAt` field.
+   If it is hours old during market hours, the collector is failing.
 2. **DynamoDB console**: Explore items, filter `pk = LIVE`, `sk = latest`.
    The `refreshedAt` field is the last successful collector timestamp.
 3. **CloudWatch Logs**: Log group `/aws/lambda/harrys-risers-CollectorFunction-XXXX`.
@@ -257,6 +303,7 @@ HistoryComponent, `'**'` -> redirect `''`. `app.ts` renders `<router-outlet>`.
 - **No API keys in the frontend** — everything is server-side now.
 - **No dev proxy** — Flask sets CORS; deleted `proxy.conf.json`.
 - **Do not re-add Finnhub** — replaced by yfinance.
+- **Do not re-add StockTwits** — removed 2026-05; Reddit is the intended signal.
 - **Do not attempt unauthenticated Reddit JSON API** — blocked (403). Use RSS
   (current) or PRAW (when registered).
 - **Reddit OAuth / PRAW is dormant** until registration clears; `praw_source.py`

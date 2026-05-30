@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import calendar
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 import feedparser
 import requests
@@ -30,8 +31,11 @@ _TIMEOUT = 10
 class RSSRedditSource:
     def get_ticker_mentions(self, limit: int = 20) -> list[TickerMention]:
         all_posts: list[RedditPost] = []
-        for sub in SUBREDDITS:
-            all_posts.extend(self._fetch_subreddit(sub))
+        # Fetch subreddits concurrently — these are independent I/O-bound GETs,
+        # so this collapses ~5x sequential latency into roughly one request.
+        with ThreadPoolExecutor(max_workers=len(SUBREDDITS)) as pool:
+            for posts in pool.map(self._fetch_subreddit, SUBREDDITS):
+                all_posts.extend(posts)
 
         scores = score_tickers(all_posts)
         ranked = sorted(
