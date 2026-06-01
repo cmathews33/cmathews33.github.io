@@ -22,6 +22,7 @@ class RedditPost:
     num_comments: int = 0
     upvote_ratio: float = 0.5
     created_utc: float = 0.0  # epoch seconds
+    url: str = ""  # canonical Reddit post URL; used to fetch num_comments via .json
 
 
 @dataclass
@@ -44,6 +45,7 @@ class Stock:
     price_change: float
     percent_change: float
     mention_score: int
+    total_comments: int
     source: str
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -55,6 +57,7 @@ class Stock:
             "priceChange": self.price_change,
             "percentChange": self.percent_change,
             "mentionScore": self.mention_score,
+            "totalComments": self.total_comments,
             "source": self.source,
             "postTimestamp": self.timestamp.astimezone(timezone.utc).isoformat(),
         }

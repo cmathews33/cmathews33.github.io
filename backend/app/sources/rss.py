@@ -2,8 +2,10 @@
 
 Port of my-app/src/app/services/reddit.service.ts. Server-side there is no CORS
 and no browser blocking, so a plain GET with a browser User-Agent works. RSS has
-the same limitations as before: no num_comments (defaults to 0) and no
-upvote_ratio (defaults to 0.5 -> neutral sentiment).
+no upvote_ratio (defaults to 0.5 -> neutral sentiment) and no comment counts —
+Reddit's Atom feeds do not include num_comments, and unauthenticated JSON API
+requests are blocked (403) from server IPs. total_comments will remain 0 until
+PRAW OAuth is enabled (praw_source.py drop-in, env REDDIT_SOURCE=praw).
 """
 from __future__ import annotations
 
@@ -43,10 +45,11 @@ class RSSRedditSource:
             key=lambda item: item[1]["score"],
             reverse=True,
         )[:limit]
+
         return [build_mention_data(ticker, data["posts"], data["score"]) for ticker, data in ranked]
 
     def _fetch_subreddit(self, sub: str) -> list[RedditPost]:
-        url = f"https://www.reddit.com/r/{sub}/hot.rss?limit=100"
+        url = f"https://www.reddit.com/r/{sub}/top.rss?limit=100"
         try:
             resp = requests.get(
                 url, headers={"User-Agent": _USER_AGENT}, timeout=_TIMEOUT
@@ -69,6 +72,7 @@ class RSSRedditSource:
                     num_comments=0,
                     upvote_ratio=0.5,
                     created_utc=created_utc,
+                    url=entry.get("link", ""),
                 )
             )
         return posts
