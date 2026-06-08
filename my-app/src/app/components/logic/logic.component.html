@@ -66,8 +66,8 @@
             </tr>
             <tr>
               <td><code>select</code></td>
-              <td>12:00am daily</td>
-              <td>Rank prior day's tickers by distinct-post count, freeze top 20 with post links as the day's displayed list</td>
+              <td>8:00am daily</td>
+              <td>Read the 24h window from 8am yesterday to 8am today, rank tickers by distinct-post count, freeze top 20 with post links as the day's displayed list</td>
             </tr>
             <tr>
               <td><code>open</code></td>
@@ -96,7 +96,7 @@
         </ul>
 
         <h3 class="block-title" style="margin-top:1.25rem">Why the list is frozen daily</h3>
-        <p class="body-text" style="margin-top:0">Reddit posts are <em>accumulated through the whole day</em> and the top 20 by distinct-post count are frozen once at midnight. This makes day-over-day trends legible &mdash; a ticker that spiked at 10am still shows up in that day's record, and the displayed list doesn't churn every 15 minutes.</p>
+        <p class="body-text" style="margin-top:0">Reddit posts are <em>accumulated continuously</em> and the top 20 by distinct-post count are frozen once at <strong>8am ET</strong>, based on the preceding 24-hour window (8am yesterday &rarr; 8am today). For example, the list shown on June 4th reflects posts from 8am June 3rd through 8am June 4th &mdash; anchored just before US market open. This makes day-over-day trends legible and the displayed list doesn't churn every 15 minutes.</p>
       </div>
     </div>
   </section>
@@ -196,7 +196,7 @@ Each stock: &#123; ticker, name, price, priceChange, percentChange,
       <li><strong>Not real-time prices</strong> &mdash; intraday prices are snapshots from the last <code>price</code> run (every 15 min during market hours); the daily record is anchored to the <code>open</code> and <code>close</code> captures</li>
       <li><strong>Not a day-trading signal</strong> &mdash; the purpose is to compile Reddit discussion + daily price movement into one place over time, not to surface intraday opportunities</li>
       <li><strong>Post history only exists from deploy date forward</strong> &mdash; backfilled rows carry real yfinance prices but <code>postCount=0</code>, since Reddit post history for past dates was not tracked</li>
-      <li><strong>List is frozen daily, not live</strong> &mdash; the 20 stocks shown today were the top Reddit-mentioned tickers <em>yesterday</em>; intraday price refreshes apply to that fixed list</li>
+      <li><strong>List is frozen daily, not live</strong> &mdash; the 20 stocks shown today were the top Reddit-mentioned tickers in the 24h window ending at 8am today; intraday price refreshes apply to that fixed list</li>
     </ul>
   </section>
 

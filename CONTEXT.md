@@ -22,7 +22,7 @@ accumulation. All data-gathering now happens server-side.
 ```
 EventBridge (5 mode schedules, America/New_York) -> CollectorFunction (Lambda)
    accumulate (hourly)  -> tally distinct Reddit posts per ticker for the day
-   select   (12am ET)   -> freeze prior day's top 20 (tickers + post links) as today's list
+   select   (8am ET)    -> freeze top 20 from 8am yesterday–8am today as today's list
    open     (9:30am ET) -> capture each ticker's start-of-day price
    price    (intraday)  -> refresh live prices for the frozen list (Reddit data NOT refreshed)
    close    (4pm ET)    -> write one daily trend record per ticker (SOD/EOD/%chg/posts)
@@ -33,13 +33,15 @@ Angular (GitHub Pages, thin client) -> GET /api/stocks, GET /api/historical
 ```
 
 **Daily-trend model (2026-06 redesign):** the top-20 list is no longer recomputed every 15
-min. Reddit posts are *accumulated through the day*; at midnight ET the top 20 by post count
-are *frozen* as the next day's displayed list (with links to the posts). Prices still refresh
-intraday for that frozen list, but the Reddit signal is fixed for the day. At the close, one
-clean **daily trend record** per ticker (start-of-day price, end-of-day price, % change, post
-count, post links) is written to history — far more useful for spotting short- and long-term
-trends than the old per-15-min snapshot churn. This is **not** a day-trading tool; the goal is
-to compile Reddit discussion + price movement into one place over time.
+min. Reddit posts are *accumulated continuously*; at **8am ET** the top 20 by post count from
+the **preceding 24-hour window (8am yesterday → 8am today)** are *frozen* as that day's
+displayed list (with links to the posts). For example, the list shown on June 4th reflects posts
+from 8am June 3rd through 8am June 4th. Prices still refresh intraday for that frozen list, but
+the Reddit signal is fixed for the day. At the close, one clean **daily trend record** per
+ticker (start-of-day price, end-of-day price, % change, post count, post links) is written to
+history — far more useful for spotting short- and long-term trends than the old per-15-min
+snapshot churn. This is **not** a day-trading tool; the goal is to compile Reddit discussion +
+price movement into one place over time.
 
 **StockTwits was removed (2026-05).** Reddit discussion is the intended signal and
 StockTwits added nothing that Reddit + yfinance don't already cover.
@@ -260,9 +262,10 @@ then rebuild and redeploy the Angular frontend (`ng build && ng deploy`).
   `cryptocurrency` — all via `hot.rss?limit=100`, fetched in parallel.
 - **Refresh cadence**: the collector runs as five `ScheduleV2` cron schedules in
   `template.yaml`, each passing a `mode` in its `Input` (timezone `America/New_York`,
-  so DST is handled): `accumulate` hourly all week, `select` at 12am ET, `open` at
-  9:30am ET, `price` every 15 min 10am–4pm ET weekdays, `close` at 4pm ET. One Lambda
-  image serves all modes; `handlers.collector_handler` dispatches on `event["mode"]`.
+  so DST is handled): `accumulate` hourly all week, `select` at 8am ET (reads 8am
+  yesterday → 8am today), `open` at 9:30am ET, `price` every 15 min 10am–4pm ET
+  weekdays, `close` at 4pm ET. One Lambda image serves all modes;
+  `handlers.collector_handler` dispatches on `event["mode"]`.
 - **`src/environments/` removed from `my-app/.gitignore`** — was excluded when
   environment files held secrets (Finnhub key, Reddit client ID). No secrets remain
   there, so the files are now tracked so fresh clones can build.

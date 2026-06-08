@@ -15,8 +15,8 @@ by the EventBridge schedule's `Input` `mode` (see `app/handlers.collector_handle
 
 | Mode | When (ET) | What it does |
 |---|---|---|
-| `accumulate` | hourly, all week | Fetch the Reddit hot/top feeds, map posts → tickers, and **merge into today's per-ticker tally**, deduping by post URL. |
-| `select` | 12:00am daily | Read the **prior day's** accumulation, rank tickers by distinct-post count, and **freeze the top 20** (tickers + post links + count) as the day's displayed list. |
+| `accumulate` | hourly, all week | Fetch the Reddit hot/top feeds, map posts → tickers, and **merge into the rolling per-ticker tally**, deduping by post URL. |
+| `select` | 8:00am daily | Read the **preceding 24-hour window** (8am yesterday → 8am today), rank tickers by distinct-post count, and **freeze the top 20** (tickers + post links + count) as the day's displayed list. |
 | `open` | 9:30am, weekdays | Fetch live prices for the frozen 20 and record each ticker's **start-of-day price**. |
 | `price` | every 15 min, 10am–4pm weekdays | Refresh live prices for the frozen list. **Reddit data is not refreshed** — the list is fixed for the day. |
 | `close` | 4:00pm, weekdays | Fetch end-of-day prices and write **one daily trend record per ticker**. |
@@ -29,8 +29,15 @@ data fetching itself.
 The old design recomputed the top 20 every 15 minutes and wrote a fresh history snapshot each
 run, so both the list and its history churned constantly — a ticker that spiked at 10am could
 look unremarkable by the last run, and the displayed list never sat still. Freezing the list
-once per day from the prior day's accumulated post counts, and writing one clean record per
-ticker per day, makes day-over-day and month-over-month trends legible.
+once per day from a full 24-hour accumulation window, and writing one clean record per ticker
+per day, makes day-over-day and month-over-month trends legible.
+
+### The 8am freeze window
+
+The `select` phase runs at **8:00am ET** and reads the 24-hour window from **8am yesterday to
+8am today**. For example, the list displayed on June 4th captures posts from 8am June 3rd
+through 8am June 4th. This anchors the freeze just before US market open, so the Reddit signal
+driving the day's list always reflects the most recent pre-market discussion window.
 
 ---
 
