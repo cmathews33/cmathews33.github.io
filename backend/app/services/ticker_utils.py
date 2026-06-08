@@ -1,9 +1,10 @@
 """Port of my-app/src/app/utils/ticker-utils.ts.
 
 Keep this in sync with the TypeScript original: same NON_TICKERS set, same
-$TICKER weight=2 / bare-caps weight=1 scoring, same sentiment thresholds.
-`formatSource` is intentionally NOT ported — it stays in the frontend as a
-display concern.
+sentiment thresholds. Scoring is a plain **post count** — a ticker counts once
+per post that mentions it, whether written as `$TICKER` or a bare uppercase
+token (the old $TICKER=2 / bare-caps=1 weighting was removed). `formatSource` is
+intentionally NOT ported — it stays in the frontend as a display concern.
 """
 from __future__ import annotations
 
@@ -37,46 +38,58 @@ _DOLLAR_TICKER = re.compile(r"\$([A-Z]{1,5})\b")
 _BARE_TICKER = re.compile(r"\b([A-Z]{2,5})\b")
 
 
-def extract_tickers(text: str) -> dict[str, int]:
-    weights: dict[str, int] = {}
+def extract_tickers(text: str) -> set[str]:
+    """Return the set of ticker symbols mentioned in `text`.
 
-    # $TICKER — intentional mention, weight 2
+    A ticker is recognised whether written as `$TICKER` or as a bare uppercase
+    2-5 letter token (filtered against NON_TICKERS). There is no weighting — a
+    ticker either appears in the text or it does not.
+    """
+    tickers: set[str] = set()
+
+    # $TICKER — explicit cashtag.
     for m in _DOLLAR_TICKER.finditer(text):
-        t = m.group(1)
-        weights[t] = weights.get(t, 0) + 2
+        tickers.add(m.group(1))
 
-    # Bare uppercase 2-5 letters — weight 1, filtered against non-ticker words.
-    # Matches TS: only add if not already present (so a $TICKER hit isn't doubled).
+    # Bare uppercase 2-5 letters, filtered against common non-ticker words.
     for m in _BARE_TICKER.finditer(text):
         t = m.group(1)
-        if t not in NON_TICKERS and t not in weights:
-            weights[t] = weights.get(t, 0) + 1
+        if t not in NON_TICKERS:
+            tickers.add(t)
 
-    return weights
+    return tickers
 
 
 def score_tickers(posts: list[RedditPost]) -> dict[str, dict]:
-    """Returns {ticker: {"score": int, "posts": [RedditPost]}}."""
+    """Returns {ticker: {"score": int, "posts": [RedditPost]}}.
+
+    `score` is the number of distinct posts that mention the ticker — a plain
+    post count, not a weighted intensity score.
+    """
     scores: dict[str, dict] = {}
 
     for post in posts:
         mentioned = extract_tickers(f"{post.title} {post.selftext}")
-        for ticker, weight in mentioned.items():
+        for ticker in mentioned:
             entry = scores.setdefault(ticker, {"score": 0, "posts": []})
-            entry["score"] += weight
             if post not in entry["posts"]:
                 entry["posts"].append(post)
+                entry["score"] += 1
 
     return scores
+
+
+# How many post links to retain per ticker for the UI (the count itself is
+# unaffected — this only bounds the stored/serialised list of links).
+MAX_POSTS_PER_TICKER = 15
 
 
 def build_mention_data(
     ticker: str, posts: list[RedditPost], score: int | None = None
 ) -> TickerMention:
     total_comments = sum(p.num_comments for p in posts)
-    # Use weighted score when available (Reddit RSS has no num_comments, so
-    # score — reflecting $TICKER weight=2 + bare-caps weight=1 — is the best
-    # signal of discussion intensity). Fall back to post count otherwise.
+    # The mention signal is a plain post count. `score` (from score_tickers) is
+    # already that count; fall back to len(posts) if not provided.
     mention_count = score if score is not None else len(posts)
     avg_ratio = (
         sum(p.upvote_ratio for p in posts) / len(posts) if posts else 0.5
@@ -103,6 +116,11 @@ def build_mention_data(
         else datetime.now(timezone.utc)
     )
 
+    # Keep the most recent posts as links for the UI (newest first).
+    recent_posts = sorted(posts, key=lambda p: p.created_utc, reverse=True)[
+        :MAX_POSTS_PER_TICKER
+    ]
+
     return TickerMention(
         ticker=ticker,
         mention_count=mention_count,
@@ -110,4 +128,5 @@ def build_mention_data(
         sentiment=sentiment,
         latest_post_time=latest_time,
         source=source,
+        posts=recent_posts,
     )

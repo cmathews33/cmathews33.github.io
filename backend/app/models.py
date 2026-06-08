@@ -22,7 +22,21 @@ class RedditPost:
     num_comments: int = 0
     upvote_ratio: float = 0.5
     created_utc: float = 0.0  # epoch seconds
-    url: str = ""  # canonical Reddit post URL; used to fetch num_comments via .json
+    url: str = ""  # canonical Reddit post URL; used to dedupe and to link from the UI
+
+    def to_json(self) -> dict:
+        """Shape for output/storage: enough to render a clickable link in the UI."""
+        posted_at = (
+            datetime.fromtimestamp(self.created_utc, tz=timezone.utc).isoformat()
+            if self.created_utc
+            else None
+        )
+        return {
+            "title": self.title,
+            "url": self.url,
+            "subreddit": self.subreddit,
+            "postedAt": posted_at,
+        }
 
 
 @dataclass
@@ -35,6 +49,7 @@ class TickerMention:
     sentiment: Sentiment
     latest_post_time: datetime
     source: str
+    posts: list[RedditPost] = field(default_factory=list)
 
 
 @dataclass
@@ -44,10 +59,14 @@ class Stock:
     price: float
     price_change: float
     percent_change: float
-    mention_score: int
+    mention_score: int  # number of Reddit posts mentioning this ticker (post count)
     total_comments: int
     source: str
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Links to the Reddit posts that mention this ticker (for the UI to display).
+    posts: list[dict] = field(default_factory=list)
+    # Start-of-day price, captured at market open; None until the open run sets it.
+    sod_price: float | None = None
 
     def to_json(self) -> dict:
         return {
@@ -60,4 +79,6 @@ class Stock:
             "totalComments": self.total_comments,
             "source": self.source,
             "postTimestamp": self.timestamp.astimezone(timezone.utc).isoformat(),
+            "posts": self.posts,
+            "sodPrice": self.sod_price,
         }

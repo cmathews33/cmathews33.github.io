@@ -8,12 +8,24 @@ from __future__ import annotations
 import os
 from typing import Protocol
 
-from app.models import TickerMention
+from app.models import RedditPost, TickerMention
 
 
 class RedditSource(Protocol):
     def get_ticker_mentions(self, limit: int = 20) -> list[TickerMention]:
         """Return scored ticker mentions, highest score first, capped at `limit`."""
+        ...
+
+    def fetch_posts(self) -> list[RedditPost]:
+        """Return the current batch of raw posts (used by the daily accumulator)."""
+        ...
+
+    def fetch_posts_for_period(self, t: str) -> list[RedditPost]:
+        """Return top posts for the given Reddit time period.
+
+        `t` must be one of: day | week | month | year.
+        Used by the backfill script to discover period-appropriate trending tickers.
+        """
         ...
 
 

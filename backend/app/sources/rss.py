@@ -21,7 +21,7 @@ from app.services.ticker_utils import build_mention_data, score_tickers
 
 log = logging.getLogger(__name__)
 
-SUBREDDITS = ("wallstreetbets", "stocks", "investing", "pennystocks", "cryptocurrency")
+SUBREDDITS = ("stocks", "valueinvesting", "investing", "securityanalysis", "stockmarket", "daytrading", "wallstreetbets")
 MIN_SCORE = 1
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -31,13 +31,24 @@ _TIMEOUT = 10
 
 
 class RSSRedditSource:
-    def get_ticker_mentions(self, limit: int = 20) -> list[TickerMention]:
+    def fetch_posts(self) -> list[RedditPost]:
+        """All current top posts across the tracked subreddits (no time filter)."""
+        return self._fetch_all(t=None)
+
+    def fetch_posts_for_period(self, t: str) -> list[RedditPost]:
+        """Top posts for a specific Reddit time period (day | week | month | year)."""
+        return self._fetch_all(t=t)
+
+    def _fetch_all(self, t: str | None) -> list[RedditPost]:
+        """Concurrent fetch across all subreddits, optionally filtered by Reddit period."""
         all_posts: list[RedditPost] = []
-        # Fetch subreddits concurrently — these are independent I/O-bound GETs,
-        # so this collapses ~5x sequential latency into roughly one request.
         with ThreadPoolExecutor(max_workers=len(SUBREDDITS)) as pool:
-            for posts in pool.map(self._fetch_subreddit, SUBREDDITS):
+            for posts in pool.map(lambda sub: self._fetch_subreddit(sub, t=t), SUBREDDITS):
                 all_posts.extend(posts)
+        return all_posts
+
+    def get_ticker_mentions(self, limit: int = 20) -> list[TickerMention]:
+        all_posts = self._fetch_all(t=None)
 
         scores = score_tickers(all_posts)
         ranked = sorted(
@@ -48,8 +59,9 @@ class RSSRedditSource:
 
         return [build_mention_data(ticker, data["posts"], data["score"]) for ticker, data in ranked]
 
-    def _fetch_subreddit(self, sub: str) -> list[RedditPost]:
-        url = f"https://www.reddit.com/r/{sub}/top.rss?limit=100"
+    def _fetch_subreddit(self, sub: str, t: str | None = None) -> list[RedditPost]:
+        params = "limit=100" + (f"&t={t}" if t else "")
+        url = f"https://www.reddit.com/r/{sub}/top.rss?{params}"
         try:
             resp = requests.get(
                 url, headers={"User-Agent": _USER_AGENT}, timeout=_TIMEOUT

@@ -20,12 +20,26 @@ accumulation. All data-gathering now happens server-side.
 ## Current Architecture (post 2026-05 re-architecture)
 
 ```
-EventBridge (market-hours cron: 15 min during US market hours, hourly otherwise)
-   -> CollectorFunction (Lambda) -> Reddit RSS + yfinance -> DynamoDB (live snapshot + daily history)
+EventBridge (5 mode schedules, America/New_York) -> CollectorFunction (Lambda)
+   accumulate (hourly)  -> tally distinct Reddit posts per ticker for the day
+   select   (12am ET)   -> freeze prior day's top 20 (tickers + post links) as today's list
+   open     (9:30am ET) -> capture each ticker's start-of-day price
+   price    (intraday)  -> refresh live prices for the frozen list (Reddit data NOT refreshed)
+   close    (4pm ET)    -> write one daily trend record per ticker (SOD/EOD/%chg/posts)
+   -> Reddit RSS + yfinance -> DynamoDB
 API Gateway (HTTP API)
-   -> ApiFunction (Lambda, Flask) -> DynamoDB (live snapshot + accumulated history) -> JSON
+   -> ApiFunction (Lambda, Flask) -> DynamoDB (live snapshot + accumulated daily records) -> JSON
 Angular (GitHub Pages, thin client) -> GET /api/stocks, GET /api/historical
 ```
+
+**Daily-trend model (2026-06 redesign):** the top-20 list is no longer recomputed every 15
+min. Reddit posts are *accumulated through the day*; at midnight ET the top 20 by post count
+are *frozen* as the next day's displayed list (with links to the posts). Prices still refresh
+intraday for that frozen list, but the Reddit signal is fixed for the day. At the close, one
+clean **daily trend record** per ticker (start-of-day price, end-of-day price, % change, post
+count, post links) is written to history — far more useful for spotting short- and long-term
+trends than the old per-15-min snapshot churn. This is **not** a day-trading tool; the goal is
+to compile Reddit discussion + price movement into one place over time.
 
 **StockTwits was removed (2026-05).** Reddit discussion is the intended signal and
 StockTwits added nothing that Reddit + yfinance don't already cover.
@@ -70,11 +84,13 @@ tests/               # pytest: ticker scoring + API route logic (pure, no networ
 
 ### JSON contract
 Each stock object (`Stock.to_json()`) emits:
-`{ ticker, name, price, priceChange, percentChange, mentionScore, source, postTimestamp }`
+`{ ticker, name, price, priceChange, percentChange, mentionScore, totalComments, source, postTimestamp, posts, sodPrice }`
 where `postTimestamp` is ISO 8601 (time of the most recent Reddit post mentioning this ticker —
 not the price capture time; use the top-level `refreshedAt` for price staleness).
-`mentionScore` is the weighted Reddit mention score (`$TICKER`=2pts, bare caps=1pt); it is
-**not** a comment count — RSS does not expose comment counts.
+`mentionScore` is now a **plain post count** — the number of distinct Reddit posts that mention
+the ticker (the old `$TICKER`=2 / bare-caps=1 weighting was removed). `posts` is a list of
+`{ title, url, subreddit, postedAt }` so the UI can link to the actual discussions.
+`sodPrice` is the ticker's start-of-day price (captured at market open; null before then).
 `sentiment` was removed: RSS always returns `upvote_ratio=0.5` → always "neutral", so the
 field was dead. It remains in DynamoDB storage as a placeholder for future NLP sentiment.
 `price`/`priceChange`/`percentChange` use `regular_market_price` (regular session only, no
@@ -85,35 +101,71 @@ extended-hours bleed) so they match what Yahoo Finance shows as the day's offici
 - `GET /api/stocks` -> `{ stocks: [...], refreshedAt }`. Serves DynamoDB `LIVE/latest`
   if `DYNAMODB_TABLE` is set; otherwise (local dev) computes live on demand via
   `collector.collect_live()` (wrapping with a fresh `refreshedAt`).
-- `GET /api/historical?period=1mo|6mo|1yr[&ticker=SYM]` -> **accumulated daily trend
-  history** read from the DynamoDB `TICKER#/DATE#` snapshots (NOT a live yfinance
-  call). `period` maps to a look-back cutoff (30/182/365 days). With `ticker` it
-  returns `{ ticker, points: [{date, price, mentionCount, source}] }`;
-  without it, an array of that shape for each ticker in the LIVE snapshot. **Requires
-  DynamoDB** — returns 503 if the table is unset. Run the backfill once so there is
-  real price history immediately (see below).
+- `GET /api/historical?period=day|week|month|year[&ticker=SYM]` -> **accumulated daily
+  trend records** read from the DynamoDB `TICKER#/DATE#` rows (NOT a live yfinance call).
+  `period` maps to a look-back window (`day`=1d, `week`=7d, `month`=30d, `year`=365d).
+  The old `1mo`/`6mo`/`1yr` values are **invalid** (return 400).
+  - With `ticker`: returns `{ ticker, periodPostCount, periodPriceChange, points: [{date,
+    sodPrice, eodPrice, priceChange, percentChange, postCount, posts, source}] }`.
+    (`price`/`mentionCount` kept as legacy aliases of `eodPrice`/`postCount`.)
+  - Without `ticker`: array of that shape for **all known tickers** (from the
+    `KNOWN_TICKERS` index) that have at least one record in the date window, ranked by
+    `periodPostCount` descending, capped at 50. This ensures each period shows the tickers
+    that were trending *in that window*, not just today's frozen live 20.
+    - `periodPostCount` = total distinct-post mentions of this ticker across all records
+      in the window.
+    - `periodPriceChange` = percent change from first `sodPrice` to last `eodPrice` in
+      the window (computed by the API, not passed from client).
+  **Requires DynamoDB** — returns 503 if the table is unset. Run the backfill once so
+  there is real history immediately (see below).
 
 ### DynamoDB schema (single table, PK/SK)
-- `LIVE` / `latest` -> `{ stocks: [...], refreshedAt }` (the cached live snapshot)
-- `TICKER#{sym}` / `DATE#{yyyy-mm-dd}` -> `{ price, mentionCount, source, sentiment, ttl }`
-  (per-ticker daily snapshot; `ttl` expires rows after ~400 days). Written by the
-  collector each run AND seeded by `scripts/backfill_history.py`; read by
-  `/api/historical` via `store.query_ticker_history` / `query_histories`.
+- `LIVE` / `latest` -> `{ stocks: [...], refreshedAt }` — the display snapshot served to the
+  UI (frozen list + live prices). Written by the `open`/`price`/`close` runs.
+- `SELECTION` / `current` -> `{ selectedFor, stocks: [{ticker, mentionScore, posts}] }` — the
+  day's frozen top 20. Written at midnight by the `select` run; read by the price runs.
+- `ACCUM#{yyyy-mm-dd}` / `TICKER#{sym}` -> `{ count, posts, urls, ttl }` — the running
+  per-ticker post tally for that day (deduped by post URL). Short TTL (~3 days). Written by
+  the `accumulate` run; read by `select`.
+- `TICKER#{sym}` / `DATE#{yyyy-mm-dd}` -> `{ sodPrice, eodPrice, priceChange, percentChange,
+  postCount, posts, source, ttl }` — one **daily trend record** per ticker (`ttl` ~400 days).
+  Written once at the `close` run AND seeded (price-only) by `scripts/backfill_history.py`;
+  read by `/api/historical` via `store.query_ticker_history` / `query_histories`.
+- `KNOWN_TICKERS` / `all` -> DynamoDB StringSet `tickers` — the union of every ticker symbol
+  that has ever appeared in a daily close record or backfill. Updated atomically by each
+  `close` run and by `backfill_history.py`. Used by `/api/historical` (multi-ticker path) to
+  know what to query without scanning the whole table.
 
 ### Ticker selection
-**Reddit RSS is the single source**, capped at 20 by weighted mention score
-(`$TICKER` weight 2, bare caps weight 1). StockTwits was removed — Reddit discussion
-is the intended signal and StockTwits added nothing yfinance/Reddit didn't cover.
+**Reddit RSS is the single source.** The displayed top 20 are *frozen once per day*: posts are
+accumulated through the prior day and ranked by **post count** (number of distinct posts
+mentioning the ticker — no weighting), then the top 20 are frozen at midnight ET as the next
+day's list. StockTwits was removed — Reddit discussion is the intended signal and StockTwits
+added nothing yfinance/Reddit didn't cover.
 
 ### Cold-start backfill
-Accumulated snapshots only grow going forward, so a fresh table has almost no
-history. `scripts/backfill_history.py` pulls ~1y of daily closes from yfinance
-(batched via `prices.get_daily_closes`) and writes price-only `TICKER#/DATE#` rows
-(`mentionCount=0`, `source="backfill"`). The scheduled collector then overwrites
-*today's* row with real mention data. Run once after deploy:
+Accumulated daily records only grow going forward, so a fresh table has no history.
+`scripts/backfill_history.py` has two modes:
+
+**Reddit-period discovery (default — run this first):**
+For each of `day`, `week`, `month`, `year` it fetches Reddit's top posts for that window
+(`?t=day|week|month|year`), discovers the top-20 trending tickers, registers them in the
+`KNOWN_TICKERS` index, and seeds their yfinance price history. This ensures the historical
+tab shows period-appropriate tickers, not just today's live 20:
 ```bash
 DYNAMODB_TABLE=harrys-risers .venv/bin/python -m scripts.backfill_history
+# or target a single period:
+DYNAMODB_TABLE=harrys-risers .venv/bin/python -m scripts.backfill_history --period month
 ```
+
+**Explicit-ticker price seeding (optional):**
+```bash
+DYNAMODB_TABLE=harrys-risers .venv/bin/python -m scripts.backfill_history AAPL TSLA NVDA
+```
+
+Backfilled rows are price-only: `sodPrice == eodPrice == close`, `priceChange == 0`,
+`postCount == 0`, `source="backfill-{period}"`. The `close` run overwrites them day-by-day
+with the real daily trend record as the app accumulates live data.
 
 ### Local development
 
@@ -156,13 +208,13 @@ aws dynamodb create-table --endpoint-url http://localhost:8001 \
   --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=S \
   --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE
 
-# 3. Seed price history, then run the collector once for a live snapshot
+# 3. Seed history (discovers period-appropriate tickers from Reddit + prices from yfinance)
 .venv/bin/python -m scripts.backfill_history
-.venv/bin/python -c "from app.services import collector, store; s=collector.collect_live(); store.put_live(s); store.put_snapshots(s)"
 
 # 4. Start Flask with the same env, then:
-curl "http://localhost:8000/api/historical?period=1mo"
-curl "http://localhost:8000/api/historical?ticker=AAPL&period=6mo"
+curl "http://localhost:8000/api/historical?period=month"
+curl "http://localhost:8000/api/historical?period=week"
+curl "http://localhost:8000/api/historical?ticker=AAPL&period=year"
 ```
 
 **Run tests:**
@@ -198,17 +250,19 @@ then rebuild and redeploy the Angular frontend (`ng build && ng deploy`).
   via pandas-datareader in `services/prices.py`.
 - yfinance correctly drops bad/delisted symbols (e.g. `$IRA`).
 - **RSS `num_comments` is always 0** — Reddit RSS feeds do not include comment
-  counts. `mentionScore` in the API response reflects the weighted mention score
-  (weight 2 for `$TICKER`, weight 1 for bare caps) — a discussion-intensity signal,
-  not a literal comment count. Real comment counts require PRAW (OAuth).
+  counts. `mentionScore` in the API response is a **post count** — the number of
+  distinct posts mentioning the ticker (accumulated across the day for the frozen
+  list). Real comment counts require PRAW (OAuth).
 - **`hot.rss` not `new.rss`** — switched to hot feed so posts have real engagement
   behind them. New posts are unvetted noise; hot posts are ranked by upvotes +
   comment velocity.
 - **Subreddits**: `wallstreetbets`, `stocks`, `investing`, `pennystocks`,
   `cryptocurrency` — all via `hot.rss?limit=100`, fetched in parallel.
-- **Refresh cadence**: the collector runs every **15 min during US market hours**
-  (weekdays) and **hourly otherwise** via two `ScheduleV2` cron schedules in
-  `template.yaml` (timezone `America/New_York`, so DST is handled).
+- **Refresh cadence**: the collector runs as five `ScheduleV2` cron schedules in
+  `template.yaml`, each passing a `mode` in its `Input` (timezone `America/New_York`,
+  so DST is handled): `accumulate` hourly all week, `select` at 12am ET, `open` at
+  9:30am ET, `price` every 15 min 10am–4pm ET weekdays, `close` at 4pm ET. One Lambda
+  image serves all modes; `handlers.collector_handler` dispatches on `event["mode"]`.
 - **`src/environments/` removed from `my-app/.gitignore`** — was excluded when
   environment files held secrets (Finnhub key, Reddit client ID). No secrets remain
   there, so the files are now tracked so fresh clones can build.
@@ -269,24 +323,138 @@ node_modules/.bin/ng serve      # dev server (needs backend running on :8000)
 5. **HistoryComponent** (`components/history/`) — period tabs; injects
    `HistoryService` (`getState`/`load`); `effect()` loads on tab switch.
 
-### Data Model (`src/app/models/stock.model.ts`) — needs update when frontend reconnects
-The backend contract changed in 2026-05; the Angular model below is stale and must be
-updated before the frontend is rewired:
+### Data Models — full 2026-06 backend contract
+
+The Angular models are stale and must be updated. The frontend lives on a separate git
+branch (no `my-app/` on the backend branch).
+
+**`src/app/models/stock.model.ts`:**
 ```typescript
-// OLD (stale):
-interface Stock {
-  ticker: string; name: string; price: number; priceChange: number;
-  percentChange: number; commentCount: number;
-  sentiment: 'positive' | 'neutral' | 'negative';
-  source: string; timestamp: Date;
+export interface RedditPostLink {
+  title: string;
+  url: string;        // canonical Reddit post URL — open in new tab
+  subreddit: string;
+  postedAt: string;   // ISO 8601
 }
-// NEW contract from backend:
-interface Stock {
-  ticker: string; name: string; price: number; priceChange: number;
-  percentChange: number; mentionScore: number;
-  source: string; postTimestamp: Date;
+
+export interface Stock {
+  ticker: string;
+  name: string;
+  price: number;
+  priceChange: number;
+  percentChange: number;
+  mentionScore: number;     // plain post count (no $TICKER weighting)
+  totalComments: number;    // always 0 while using RSS (no auth)
+  source: string;           // most common subreddit for this ticker
+  postTimestamp: Date;      // time of most recent Reddit post
+  posts: RedditPostLink[];  // up to 15 links to the discussions
+  sodPrice: number | null;  // start-of-day price (null before market open)
+}
+
+// /api/stocks response
+export interface StocksResponse {
+  stocks: Stock[];
+  refreshedAt: string;  // ISO 8601 — time of last price refresh
 }
 ```
+
+**Historical models — add to `stock.model.ts` (or a separate `history.model.ts`):**
+```typescript
+export type HistoryPeriod = 'day' | 'week' | 'month' | 'year';
+// OLD VALUES ('1mo' | '6mo' | '1yr') ARE NOW INVALID — the API returns 400.
+
+export interface HistoryPoint {
+  date: string;           // yyyy-mm-dd
+  sodPrice: number | null;
+  eodPrice: number | null;
+  price: number | null;   // legacy alias for eodPrice
+  priceChange: number | null;
+  percentChange: number | null;
+  postCount: number;
+  mentionCount: number;   // legacy alias for postCount
+  posts: RedditPostLink[];
+  source: string;         // subreddit or "backfill-{period}"
+}
+
+export interface TickerHistory {
+  ticker: string;
+  periodPostCount: number;    // total distinct posts for this ticker in the window
+  periodPriceChange: number | null;  // % change: first sodPrice → last eodPrice
+  points: HistoryPoint[];     // daily records oldest-first
+}
+```
+
+### Frontend implementation steps (for the `my-app/` branch)
+
+**Step 1 — `src/app/models/stock.model.ts`**
+Replace with the types above. Remove `commentCount` and `sentiment`.
+
+**Step 2 — `src/app/services/api.service.ts`**
+- `getStocks()`: map DTO to `Stock` — `postTimestamp` from `postTimestamp` field;
+  `posts` passes through unchanged; `sodPrice` passes through (may be null).
+- `getHistorical(period: HistoryPeriod)`: endpoint is `GET /api/historical?period=${period}`.
+  Response is `TickerHistory[]`. No transformation needed — all computed fields come from
+  the backend. Export `HistoryPeriod` from this service.
+
+**Step 3 — `src/app/services/history.service.ts`**
+Change `HistoryPeriod` references from `'1mo' | '6mo' | '1yr'` to `'day' | 'week' | 'month' | 'year'`.
+Default period: `'month'`. No other logic changes required — the backend now computes
+`periodPriceChange` and `periodPostCount` directly.
+
+**Step 4 — `src/app/components/history/history.component.ts`**
+
+Update the `periods` array and tab labels:
+```typescript
+readonly periods: { value: HistoryPeriod; label: string }[] = [
+  { value: 'day',   label: 'Day' },
+  { value: 'week',  label: 'Week' },
+  { value: 'month', label: 'Month' },
+  { value: 'year',  label: 'Year' },
+];
+```
+
+Update `HistoryRow` interface:
+```typescript
+interface HistoryRow {
+  ticker: string;
+  periodPostCount: number;
+  periodPriceChange: number | null;
+  lastPrice: number | null;
+  lastDate: string;
+  points: HistoryPoint[];
+}
+```
+
+Update `toRow()`: read `periodPriceChange` and `periodPostCount` directly from the
+`TickerHistory` object — **do not recompute price change from first/last points** (the
+backend computes this correctly from SOD/EOD prices).
+
+Update `changeLabel` computed:
+```typescript
+readonly changeLabel = computed(() => ({
+  day:   "Today's change",
+  week:  "This week's change",
+  month: "This month's change",
+  year:  "This year's change",
+}[this.period()]));
+```
+
+In the template, display `periodPostCount` per row (e.g. "X Reddit posts this period").
+
+**Step 5 — `src/app/components/stock-list/` — add post links**
+In the stock table, add an expandable section per row that lists `stock.posts` as
+`<a [href]="post.url" target="_blank" rel="noopener">{{ post.title }}</a>` (one link per
+post, up to 15). Display `stock.mentionScore` as the post count. Display `stock.sodPrice`
+if non-null (e.g. "SOD: $xxx.xx").
+
+**Step 6 — build and verify**
+```bash
+export PATH="$HOME/.nvm/versions/node/v24.16.0/bin:$PATH"
+node_modules/.bin/ng build    # should produce 0 errors, 0 warnings
+node_modules/.bin/ng serve    # hit http://localhost:4200; historical tab → try each period tab
+```
+Confirm: `/api/historical?period=month` returns different tickers than `?period=week`;
+each row shows `periodPostCount` and `periodPriceChange`; post links open in new tabs.
 
 ### Styling — unchanged
 - Global tokens: `src/styles.css` (CSS custom properties). App layout:

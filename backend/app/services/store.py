@@ -1,8 +1,15 @@
 """DynamoDB persistence (boto3).
 
 Single table, PK/SK design:
-  * LIVE / latest          -> the collector's most recent stock list + meta
-  * TICKER#{sym} / DATE#{yyyy-mm-dd} -> daily snapshot for accumulated trend history
+  * LIVE / latest               -> the display snapshot (frozen list + live prices)
+  * SELECTION / current         -> the day's frozen top-20 (tickers + post links),
+                                   chosen at midnight from the prior day's accumulation
+  * ACCUM#{yyyy-mm-dd} / TICKER#{sym} -> running per-ticker post tally for that day
+                                   (deduped post links + count); short TTL
+  * TICKER#{sym} / DATE#{yyyy-mm-dd}  -> one daily trend record per ticker
+                                   (start/end price, % change, post count, post links)
+  * KNOWN_TICKERS / all         -> growing set of every ticker ever written to a daily
+                                   trend record (used by /api/historical to scope queries)
 
 Reads raise if DYNAMODB_TABLE is unset, so the API falls back to computing live
 in local dev (see app/api.py). Set DYNAMODB_ENDPOINT to point boto3 at a local
@@ -21,8 +28,14 @@ from app.models import Stock
 
 _LIVE_PK = "LIVE"
 _LIVE_SK = "latest"
-# Expire per-ticker daily snapshots after ~400 days.
+_SELECTION_PK = "SELECTION"
+_SELECTION_SK = "current"
+_KNOWN_PK = "KNOWN_TICKERS"
+_KNOWN_SK = "all"
+# Expire per-ticker daily trend records after ~400 days.
 _SNAPSHOT_TTL_DAYS = 400
+# Accumulation rows only matter until the next midnight select; expire quickly.
+_ACCUM_TTL_DAYS = 3
 
 
 def _table():
@@ -84,36 +97,110 @@ def put_live(stocks: list[Stock]) -> None:
     )
 
 
-def put_snapshots(stocks: list[Stock]) -> None:
-    """Write one per-ticker daily snapshot row (idempotent per ticker per day)."""
+# --- Daily Reddit accumulation (ACCUM#{date} / TICKER#{sym}) -----------------
+
+
+def query_accum(date: str) -> list[dict]:
+    """All per-ticker accumulation rows for a given day (each with a `ticker`)."""
+    resp = _table().query(KeyConditionExpression=Key("pk").eq(f"ACCUM#{date}"))
+    rows = _from_decimal(resp.get("Items", []))
+    for r in rows:
+        sk = r.get("sk", "")
+        r["ticker"] = sk[len("TICKER#"):] if sk.startswith("TICKER#") else r.get("ticker", "")
+        r["count"] = int(r.get("count", 0))
+    return rows
+
+
+def put_accum_rows(date: str, rows: list[dict]) -> None:
+    """Upsert per-ticker accumulation rows for `date`.
+
+    Each row: {ticker, count, posts:[{title,url,subreddit,postedAt}], urls:[str]}.
+    """
     table = _table()
-    now = datetime.now(timezone.utc)
-    date = now.strftime("%Y-%m-%d")
-    ttl = int(now.timestamp()) + _SNAPSHOT_TTL_DAYS * 86400
+    ttl = int(datetime.now(timezone.utc).timestamp()) + _ACCUM_TTL_DAYS * 86400
     with table.batch_writer() as batch:
-        for s in stocks:
+        for r in rows:
             batch.put_item(
                 Item=_to_decimal(
                     {
-                        "pk": f"TICKER#{s.ticker}",
-                        "sk": f"DATE#{date}",
-                        "price": s.price,
-                        "mentionCount": s.mention_score,
-                        "source": s.source,
-                        "sentiment": s.sentiment,
+                        "pk": f"ACCUM#{date}",
+                        "sk": f"TICKER#{r['ticker']}",
+                        "count": int(r.get("count", 0)),
+                        "posts": r.get("posts", []),
+                        "urls": r.get("urls", []),
                         "ttl": ttl,
                     }
                 )
             )
 
 
-def put_history_rows(rows: list[dict]) -> None:
-    """Bulk-write daily history rows (used by the cold-start backfill).
+# --- Frozen daily selection (SELECTION / current) ----------------------------
 
-    Each row: {ticker, date(yyyy-mm-dd), price, mentionCount?, sentiment?, source?}.
-    Existing rows for the same ticker/date are overwritten (so a later live
-    collector run replaces a backfilled price-only row with real mention data).
+
+def get_selection() -> dict | None:
+    """The day's frozen top-20: `{selectedFor, stocks:[{ticker, mentionScore, posts}]}`."""
+    resp = _table().get_item(Key={"pk": _SELECTION_PK, "sk": _SELECTION_SK})
+    item = resp.get("Item")
+    if not item:
+        return None
+    return {
+        "selectedFor": item.get("selectedFor"),
+        "stocks": _from_decimal(item.get("stocks", [])),
+    }
+
+
+def put_selection(selected_for: str, stocks: list[dict]) -> None:
+    """Freeze the day's displayed list (tickers + post links + post count)."""
+    _table().put_item(
+        Item=_to_decimal(
+            {
+                "pk": _SELECTION_PK,
+                "sk": _SELECTION_SK,
+                "selectedFor": selected_for,
+                "stocks": stocks,
+            }
+        )
+    )
+
+
+# --- Known-tickers index (KNOWN_TICKERS / all) --------------------------------
+
+
+def add_known_tickers(tickers: list[str]) -> None:
+    """Atomically add `tickers` to the known-tickers index.
+
+    Uses DynamoDB ADD (set union) so concurrent writes never corrupt the set.
+    Creates the item if it doesn't exist yet.
     """
+    if not tickers:
+        return
+    _table().update_item(
+        Key={"pk": _KNOWN_PK, "sk": _KNOWN_SK},
+        UpdateExpression="ADD tickers :t",
+        ExpressionAttributeValues={":t": set(tickers)},
+    )
+
+
+def get_known_tickers() -> list[str]:
+    """Return every ticker symbol that has ever been written to a daily trend record."""
+    resp = _table().get_item(Key={"pk": _KNOWN_PK, "sk": _KNOWN_SK})
+    item = resp.get("Item")
+    if not item:
+        return []
+    return sorted(item.get("tickers", set()))
+
+
+# --- Daily trend records (TICKER#{sym} / DATE#{date}) ------------------------
+
+
+def put_daily_export(rows: list[dict]) -> None:
+    """Write one daily trend record per ticker (idempotent per ticker per day).
+
+    Each row: {ticker, date(yyyy-mm-dd), sodPrice, eodPrice, priceChange,
+    percentChange, postCount, posts}.
+    Also registers all tickers in the KNOWN_TICKERS index.
+    """
+    add_known_tickers([r["ticker"] for r in rows])
     table = _table()
     ttl = int(datetime.now(timezone.utc).timestamp()) + _SNAPSHOT_TTL_DAYS * 86400
     with table.batch_writer() as batch:
@@ -123,10 +210,46 @@ def put_history_rows(rows: list[dict]) -> None:
                     {
                         "pk": f"TICKER#{r['ticker']}",
                         "sk": f"DATE#{r['date']}",
-                        "price": r["price"],
-                        "mentionCount": r.get("mentionCount", 0),
+                        "sodPrice": r.get("sodPrice"),
+                        "eodPrice": r.get("eodPrice"),
+                        "priceChange": r.get("priceChange"),
+                        "percentChange": r.get("percentChange"),
+                        "postCount": r.get("postCount", 0),
+                        "posts": r.get("posts", []),
+                        "source": r.get("source", "reddit"),
+                        "ttl": ttl,
+                    }
+                )
+            )
+
+
+def put_history_rows(rows: list[dict]) -> None:
+    """Bulk-write daily trend records (used by the cold-start backfill).
+
+    Each row: {ticker, date(yyyy-mm-dd), price}. Backfilled rows are price-only:
+    sodPrice == eodPrice == close, no change, postCount=0. Existing rows for the
+    same ticker/date are overwritten (so a later live `close` run replaces a
+    backfilled price-only row with the real daily trend record).
+    Also registers all tickers in the KNOWN_TICKERS index.
+    """
+    add_known_tickers(list({r["ticker"] for r in rows}))
+    table = _table()
+    ttl = int(datetime.now(timezone.utc).timestamp()) + _SNAPSHOT_TTL_DAYS * 86400
+    with table.batch_writer() as batch:
+        for r in rows:
+            price = r["price"]
+            batch.put_item(
+                Item=_to_decimal(
+                    {
+                        "pk": f"TICKER#{r['ticker']}",
+                        "sk": f"DATE#{r['date']}",
+                        "sodPrice": price,
+                        "eodPrice": price,
+                        "priceChange": 0.0,
+                        "percentChange": 0.0,
+                        "postCount": 0,
+                        "posts": [],
                         "source": r.get("source", "backfill"),
-                        "sentiment": r.get("sentiment", "neutral"),
                         "ttl": ttl,
                     }
                 )

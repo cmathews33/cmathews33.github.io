@@ -93,21 +93,44 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DataTable
+      # The collector runs as distinct daily phases; each schedule passes a
+      # `mode` in its Input. Times are America/New_York (handles DST).
       Events:
-        # Fresh data when it matters: every 15 min during US market hours on
-        # weekdays. Times are interpreted in America/New_York (handles DST).
-        MarketHours:
+        # Tally distinct Reddit posts per ticker through the day (hourly, all week).
+        Accumulate:
           Type: ScheduleV2
           Properties:
-            ScheduleExpression: cron(0/15 9-16 ? * MON-FRI *)
+            ScheduleExpression: cron(0 0/1 ? * * *)
             ScheduleExpressionTimezone: America/New_York
-        # Low-cadence heartbeat the rest of the time (off-hours + weekends) so
-        # the snapshot never goes badly stale. Hourly, all week.
-        OffHours:
+            Input: '{"mode": "accumulate"}'
+        # Freeze the prior day's top 20 as today's displayed list (midnight).
+        Select:
           Type: ScheduleV2
           Properties:
-            ScheduleExpression: cron(0 * ? * * *)
+            ScheduleExpression: cron(0 0 ? * * *)
             ScheduleExpressionTimezone: America/New_York
+            Input: '{"mode": "select"}'
+        # Capture each ticker's start-of-day price at market open.
+        Open:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: cron(30 9 ? * MON-FRI *)
+            ScheduleExpressionTimezone: America/New_York
+            Input: '{"mode": "open"}'
+        # Refresh live prices for the frozen list through the trading day.
+        Price:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: cron(0/15 10-15 ? * MON-FRI *)
+            ScheduleExpressionTimezone: America/New_York
+            Input: '{"mode": "price"}'
+        # Capture end-of-day price and write the daily trend record at the close.
+        Close:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: cron(0 16 ? * MON-FRI *)
+            ScheduleExpressionTimezone: America/New_York
+            Input: '{"mode": "close"}'
 
 Outputs:
   ApiUrl:
