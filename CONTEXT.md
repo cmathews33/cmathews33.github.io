@@ -22,7 +22,7 @@ accumulation. All data-gathering now happens server-side.
 ```
 EventBridge (5 mode schedules, America/New_York) -> CollectorFunction (Lambda)
    accumulate (hourly)  -> tally distinct Reddit posts per ticker for the day
-   select   (12am ET)   -> freeze prior day's top 20 (tickers + post links) as today's list
+   select   (8am ET)    -> freeze top 20 from 8am yesterday–8am today as today's list
    open     (9:30am ET) -> capture each ticker's start-of-day price
    price    (intraday)  -> refresh live prices for the frozen list (Reddit data NOT refreshed)
    close    (4pm ET)    -> write one daily trend record per ticker (SOD/EOD/%chg/posts)
@@ -33,13 +33,15 @@ Angular (GitHub Pages, thin client) -> GET /api/stocks, GET /api/historical
 ```
 
 **Daily-trend model (2026-06 redesign):** the top-20 list is no longer recomputed every 15
-min. Reddit posts are *accumulated through the day*; at midnight ET the top 20 by post count
-are *frozen* as the next day's displayed list (with links to the posts). Prices still refresh
-intraday for that frozen list, but the Reddit signal is fixed for the day. At the close, one
-clean **daily trend record** per ticker (start-of-day price, end-of-day price, % change, post
-count, post links) is written to history — far more useful for spotting short- and long-term
-trends than the old per-15-min snapshot churn. This is **not** a day-trading tool; the goal is
-to compile Reddit discussion + price movement into one place over time.
+min. Reddit posts are *accumulated continuously*; at **8am ET** the top 20 by post count from
+the **preceding 24-hour window (8am yesterday → 8am today)** are *frozen* as that day's
+displayed list (with links to the posts). For example, the list shown on June 4th reflects posts
+from 8am June 3rd through 8am June 4th. Prices still refresh intraday for that frozen list, but
+the Reddit signal is fixed for the day. At the close, one clean **daily trend record** per
+ticker (start-of-day price, end-of-day price, % change, post count, post links) is written to
+history — far more useful for spotting short- and long-term trends than the old per-15-min
+snapshot churn. This is **not** a day-trading tool; the goal is to compile Reddit discussion +
+price movement into one place over time.
 
 **StockTwits was removed (2026-05).** Reddit discussion is the intended signal and
 StockTwits added nothing that Reddit + yfinance don't already cover.
@@ -260,9 +262,10 @@ then rebuild and redeploy the Angular frontend (`ng build && ng deploy`).
   `cryptocurrency` — all via `hot.rss?limit=100`, fetched in parallel.
 - **Refresh cadence**: the collector runs as five `ScheduleV2` cron schedules in
   `template.yaml`, each passing a `mode` in its `Input` (timezone `America/New_York`,
-  so DST is handled): `accumulate` hourly all week, `select` at 12am ET, `open` at
-  9:30am ET, `price` every 15 min 10am–4pm ET weekdays, `close` at 4pm ET. One Lambda
-  image serves all modes; `handlers.collector_handler` dispatches on `event["mode"]`.
+  so DST is handled): `accumulate` hourly all week, `select` at 8am ET (reads 8am
+  yesterday → 8am today), `open` at 9:30am ET, `price` every 15 min 10am–4pm ET
+  weekdays, `close` at 4pm ET. One Lambda image serves all modes;
+  `handlers.collector_handler` dispatches on `event["mode"]`.
 - **`src/environments/` removed from `my-app/.gitignore`** — was excluded when
   environment files held secrets (Finnhub key, Reddit client ID). No secrets remain
   there, so the files are now tracked so fresh clones can build.
@@ -323,10 +326,10 @@ node_modules/.bin/ng serve      # dev server (needs backend running on :8000)
 5. **HistoryComponent** (`components/history/`) — period tabs; injects
    `HistoryService` (`getState`/`load`); `effect()` loads on tab switch.
 
-### Data Models — full 2026-06 backend contract
+### Data Models — full 2026-06 backend contract (UPDATED 2026-06-08)
 
-The Angular models are stale and must be updated. The frontend lives on a separate git
-branch (no `my-app/` on the backend branch).
+Frontend updated on branch `feature/harrys` to match the backend contract below.
+Models live in `my-app/src/app/models/stock.model.ts`.
 
 **`src/app/models/stock.model.ts`:**
 ```typescript
@@ -384,77 +387,15 @@ export interface TickerHistory {
 }
 ```
 
-### Frontend implementation steps (for the `my-app/` branch)
+### Frontend implementation — completed 2026-06-08
 
-**Step 1 — `src/app/models/stock.model.ts`**
-Replace with the types above. Remove `commentCount` and `sentiment`.
-
-**Step 2 — `src/app/services/api.service.ts`**
-- `getStocks()`: map DTO to `Stock` — `postTimestamp` from `postTimestamp` field;
-  `posts` passes through unchanged; `sodPrice` passes through (may be null).
-- `getHistorical(period: HistoryPeriod)`: endpoint is `GET /api/historical?period=${period}`.
-  Response is `TickerHistory[]`. No transformation needed — all computed fields come from
-  the backend. Export `HistoryPeriod` from this service.
-
-**Step 3 — `src/app/services/history.service.ts`**
-Change `HistoryPeriod` references from `'1mo' | '6mo' | '1yr'` to `'day' | 'week' | 'month' | 'year'`.
-Default period: `'month'`. No other logic changes required — the backend now computes
-`periodPriceChange` and `periodPostCount` directly.
-
-**Step 4 — `src/app/components/history/history.component.ts`**
-
-Update the `periods` array and tab labels:
-```typescript
-readonly periods: { value: HistoryPeriod; label: string }[] = [
-  { value: 'day',   label: 'Day' },
-  { value: 'week',  label: 'Week' },
-  { value: 'month', label: 'Month' },
-  { value: 'year',  label: 'Year' },
-];
-```
-
-Update `HistoryRow` interface:
-```typescript
-interface HistoryRow {
-  ticker: string;
-  periodPostCount: number;
-  periodPriceChange: number | null;
-  lastPrice: number | null;
-  lastDate: string;
-  points: HistoryPoint[];
-}
-```
-
-Update `toRow()`: read `periodPriceChange` and `periodPostCount` directly from the
-`TickerHistory` object — **do not recompute price change from first/last points** (the
-backend computes this correctly from SOD/EOD prices).
-
-Update `changeLabel` computed:
-```typescript
-readonly changeLabel = computed(() => ({
-  day:   "Today's change",
-  week:  "This week's change",
-  month: "This month's change",
-  year:  "This year's change",
-}[this.period()]));
-```
-
-In the template, display `periodPostCount` per row (e.g. "X Reddit posts this period").
-
-**Step 5 — `src/app/components/stock-list/` — add post links**
-In the stock table, add an expandable section per row that lists `stock.posts` as
-`<a [href]="post.url" target="_blank" rel="noopener">{{ post.title }}</a>` (one link per
-post, up to 15). Display `stock.mentionScore` as the post count. Display `stock.sodPrice`
-if non-null (e.g. "SOD: $xxx.xx").
-
-**Step 6 — build and verify**
-```bash
-export PATH="$HOME/.nvm/versions/node/v24.16.0/bin:$PATH"
-node_modules/.bin/ng build    # should produce 0 errors, 0 warnings
-node_modules/.bin/ng serve    # hit http://localhost:4200; historical tab → try each period tab
-```
-Confirm: `/api/historical?period=month` returns different tickers than `?period=week`;
-each row shows `periodPostCount` and `periodPriceChange`; post links open in new tabs.
+All five steps completed on branch `feature/harrys`:
+- `stock.model.ts` — full 2026-06 types (`RedditPostLink`, `posts`, `sodPrice`, `totalComments`, `HistoryPeriod`, `HistoryPoint`, `TickerHistory`)
+- `api.service.ts` — `HistoryPeriod` is `'day'|'week'|'month'|'year'`; `TickerHistory` carries `periodPostCount`/`periodPriceChange`
+- `history.service.ts` — state cache keyed on new periods
+- `history.component.ts` — Day/Week/Month/Year tabs; reads `periodPriceChange` from API (not recomputed); contextual `changeLabel`; **Download CSV button** exports current filtered view
+- `stock-list.component.ts` — SOD price shown inline under current price; per-row "N posts" toggle expands clickable Reddit discussion links
+- `logic.component.html` — updated to reflect current architecture (5-phase collector, daily-frozen list, new API contracts)
 
 ### Styling — unchanged
 - Global tokens: `src/styles.css` (CSS custom properties). App layout:

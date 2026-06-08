@@ -4,7 +4,7 @@ The trend pipeline runs as distinct daily phases, each a `collector` function
 dispatched by `app.handlers.collector_handler` via the EventBridge `mode`:
 
   * accumulate -> tally distinct Reddit posts per ticker through the day
-  * select     -> at midnight ET, freeze the prior day's top 20 (tickers + links)
+  * select     -> at 8am ET, freeze the past 24-hour window (8am yesterday → 8am today)
   * open       -> at market open, capture each ticker's start-of-day price
   * price      -> intraday, refresh live prices for the frozen list (Reddit data
                   is NOT refreshed — the list is fixed for the day)
@@ -38,14 +38,33 @@ _MAX_URLS = 500
 _ET = ZoneInfo("America/New_York")
 
 
+_WINDOW_HOUR = 8  # 8am ET is the daily window boundary
+
+
 def _today_et() -> str:
-    """Calendar date in ET — the key accumulation writes to / selection displays for."""
+    """Calendar date in ET — used as the display/selection date."""
     return datetime.now(_ET).date().isoformat()
 
 
-def _ended_day_et() -> str:
-    """The day that just ended in ET (robust to the midnight job firing late)."""
-    return (datetime.now(_ET) - timedelta(hours=1)).date().isoformat()
+def _window_date_et() -> str:
+    """Date key for the active accumulation window (8am-to-8am boundary).
+
+    Before 8am ET: still in yesterday's window → write to yesterday's key.
+    From 8am ET onward: new window started → write to today's key.
+    """
+    now = datetime.now(_ET)
+    if now.hour < _WINDOW_HOUR:
+        return (now.date() - timedelta(days=1)).isoformat()
+    return now.date().isoformat()
+
+
+def _ended_window_date_et() -> str:
+    """The 8am window that just closed.
+
+    Called by select() at 8am; returns yesterday's date — the window whose
+    accumulation ran from 8am yesterday to 8am today.
+    """
+    return (datetime.now(_ET).date() - timedelta(days=1)).isoformat()
 
 
 # --- Phase: accumulate -------------------------------------------------------
@@ -57,7 +76,7 @@ def accumulate() -> int:
 
     posts = get_reddit_source().fetch_posts()
     scores = score_tickers(posts)  # {ticker: {"score", "posts":[RedditPost]}}
-    date = _today_et()
+    date = _window_date_et()
 
     existing = {r["ticker"]: r for r in store.query_accum(date)}
     updated: list[dict] = []
@@ -83,10 +102,10 @@ def accumulate() -> int:
 
 
 def select() -> int:
-    """Freeze the prior day's top-20 tickers (by post count) as today's list."""
+    """Freeze the past 24h window's top-20 tickers (8am yesterday → 8am today) as today's list."""
     from app.services import store
 
-    ended = _ended_day_et()
+    ended = _ended_window_date_et()
     selected_for = _today_et()
     rows = [r for r in store.query_accum(ended) if r.get("count", 0) >= MIN_COUNT]
     rows.sort(key=lambda r: r.get("count", 0), reverse=True)

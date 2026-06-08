@@ -103,11 +103,11 @@ Resources:
             ScheduleExpression: cron(0 0/1 ? * * *)
             ScheduleExpressionTimezone: America/New_York
             Input: '{"mode": "accumulate"}'
-        # Freeze the prior day's top 20 as today's displayed list (midnight).
+        # Freeze the prior 24h window (8am yesterday → 8am today) as the displayed list.
         Select:
           Type: ScheduleV2
           Properties:
-            ScheduleExpression: cron(0 0 ? * * *)
+            ScheduleExpression: cron(0 8 ? * * *)
             ScheduleExpressionTimezone: America/New_York
             Input: '{"mode": "select"}'
         # Capture each ticker's start-of-day price at market open.
