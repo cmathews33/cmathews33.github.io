@@ -2,31 +2,29 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
-import { Stock } from '../models/stock.model';
+import { Stock, RedditPostLink, HistoryPeriod, TickerHistory } from '../models/stock.model';
 import { environment } from '../../environments/environment';
 
-interface StockDto extends Omit<Stock, 'postTimestamp'> {
+export type { HistoryPeriod, TickerHistory };
+
+interface StockDto {
+  ticker: string;
+  name: string;
+  price: number;
+  priceChange: number;
+  percentChange: number;
+  mentionScore: number;
+  totalComments: number;
+  source: string;
   postTimestamp: string;
+  posts: RedditPostLink[];
+  sodPrice: number | null;
 }
 
 interface StocksResponse {
   stocks: StockDto[];
   refreshedAt: string;
 }
-
-export interface HistoricalPoint {
-  date: string;
-  price: number;
-  mentionCount: number;
-  source: string;
-}
-
-export interface TickerHistory {
-  ticker: string;
-  points: HistoricalPoint[];
-}
-
-export type HistoryPeriod = '1mo' | '6mo' | '1yr';
 
 @Injectable({ providedIn: 'root' })
 export class ApiService {
@@ -51,6 +49,9 @@ export class ApiService {
   }
 
   private toStock(dto: StockDto): Stock {
-    return { ...dto, postTimestamp: new Date(dto.postTimestamp) };
+    return {
+      ...dto,
+      postTimestamp: new Date(dto.postTimestamp),
+    };
   }
 }

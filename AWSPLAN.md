@@ -3,15 +3,16 @@
 ## Architecture recap
 
 ```
-EventBridge (15 min during US market hours, hourly otherwise)
-  -> CollectorFunction (Lambda) -> Reddit RSS + yfinance -> DynamoDB (live + daily history)
-API Gateway -> ApiFunction (Lambda, Flask) -> DynamoDB (live + accumulated history) -> JSON
+EventBridge (5 mode schedules, America/New_York)
+  -> CollectorFunction (Lambda) -> Reddit RSS + yfinance -> DynamoDB (live + daily trend records)
+     accumulate (hourly) / select (12am) / open (9:30am) / price (intraday) / close (4pm)
+API Gateway -> ApiFunction (Lambda, Flask) -> DynamoDB (live + accumulated daily records) -> JSON
 Angular (GitHub Pages) <- GET /api/stocks, GET /api/historical
 ```
 
-Two Lambda container image functions, one HTTP API Gateway, one DynamoDB table, two
-EventBridge schedules (market-hours + off-hours). All infrastructure is defined in
-`backend/template.yaml` (AWS SAM).
+Two Lambda container image functions, one HTTP API Gateway, one DynamoDB table, five
+EventBridge schedules (one per collector phase — each passes a `mode` in its `Input`; one
+Lambda image serves all). All infrastructure is defined in `backend/template.yaml` (AWS SAM).
 
 ---
 
@@ -136,24 +137,31 @@ https://abc123xyz.execute-api.us-east-1.amazonaws.com
 | **CollectorFunction** Lambda | Lambda → Functions |
 | **AppHttpApi** (HTTP API Gateway) | API Gateway → APIs — invoke URL = your ApiUrl |
 | **DataTable** (DynamoDB) | DynamoDB → Tables |
-| **EventBridge schedules** (market-hours 15 min + off-hours hourly) | EventBridge → Schedules |
+| **EventBridge schedules** (accumulate / select / open / price / close) | EventBridge → Schedules |
 | **ECR repositories** (Docker images) | ECR → Repositories |
 | **IAM execution roles** | IAM → Roles |
 
 DynamoDB will be empty until the first CollectorFunction run (within 15 min during
 market hours, otherwise within the hour).
 
-### Seed historical price history (run once after the first deploy)
-`/api/historical` reads accumulated daily snapshots, which only grow going forward.
-Backfill ~1y of real daily prices so the historical view works immediately:
+### Seed historical data (run once after the first deploy)
+`/api/historical` reads accumulated daily records, which only grow going forward.
+Run the backfill so the historical tab has real data immediately:
 ```bash
 cd backend
 DYNAMODB_TABLE=harrys-risers AWS_DEFAULT_REGION=us-east-1 \
   .venv/bin/python -m scripts.backfill_history
 ```
-(Uses your AWS credentials to write directly to the deployed table. Omit
-`DYNAMODB_ENDPOINT` to target real AWS.) Mention/sentiment history then accumulates
-from each scheduled collector run.
+This does two things for each of the four Reddit time periods (`day`, `week`, `month`, `year`):
+1. Fetches Reddit's top posts for that period (`?t=day|week|month|year`) to discover the
+   trending tickers and write them to the `KNOWN_TICKERS` index.
+2. Seeds yfinance daily closes for those tickers into `TICKER#/DATE#` rows.
+
+After this, the scheduled `close` run overwrites rows day-by-day with real SOD/EOD/post-count
+data as the app accumulates live history. To target a single period:
+```bash
+DYNAMODB_TABLE=harrys-risers .venv/bin/python -m scripts.backfill_history --period month
+```
 
 ### Deploy gotchas encountered
 - **`ServerlessHttpApi` is a reserved SAM logical ID** — causes a warning and
@@ -220,13 +228,13 @@ sam build && sam deploy
 
 ## Monitoring and staleness detection
 
-The CollectorFunction runs every 15 min during US market hours (hourly otherwise).
-If yfinance gets throttled by Yahoo Finance, it fails silently — the API serves
-stale DynamoDB data rather than crashing.
+The CollectorFunction runs its `price` phase every 15 min during US market hours, plus
+`accumulate` hourly and `open`/`select`/`close` once a day. If yfinance gets throttled by
+Yahoo Finance, it fails silently — the API serves stale DynamoDB data rather than crashing.
 
 **Checking for stale data (in order of speed):**
 1. Hit `/api/stocks` — inspect the top-level `refreshedAt` field. If it is hours old
-   during market hours, the collector is failing.
+   during market hours, the `price` run is failing.
 2. **DynamoDB console** → Explore items → filter `pk = LIVE`, `sk = latest` →
    check the `refreshedAt` field.
 3. **CloudWatch Logs** → Log groups → `/aws/lambda/harrys-risers-CollectorFunction-XXXX`

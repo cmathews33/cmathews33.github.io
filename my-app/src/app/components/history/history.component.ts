@@ -8,28 +8,20 @@ type SortOption = 'mentions' | 'change';
 
 interface HistoryRow {
   ticker: string;
-  lastPrice: number;
-  priceChange: number;
-  percentChange: number;
-  mentionCount: number;
+  periodPostCount: number;
+  periodPriceChange: number | null;
+  lastPrice: number | null;
   lastDate: string;
 }
 
 function toRow(th: TickerHistory): HistoryRow {
-  const pts = th.points;
-  const last  = pts[pts.length - 1];
-  const first = pts[0];
-  const lastPrice   = last?.price ?? 0;
-  const firstPrice  = first?.price ?? 0;
-  const priceChange   = firstPrice > 0 ? lastPrice - firstPrice : 0;
-  const percentChange = firstPrice > 0 ? (priceChange / firstPrice) * 100 : 0;
+  const last = th.points[th.points.length - 1];
   return {
-    ticker:       th.ticker,
-    lastPrice,
-    priceChange,
-    percentChange,
-    mentionCount: last?.mentionCount ?? 0,
-    lastDate:     last?.date ?? '',
+    ticker: th.ticker,
+    periodPostCount: th.periodPostCount,
+    periodPriceChange: th.periodPriceChange,
+    lastPrice: last?.eodPrice ?? last?.price ?? null,
+    lastDate: last?.date ?? '',
   };
 }
 
@@ -102,6 +94,12 @@ function toRow(th: TickerHistory): HistoryRow {
               <option value="change">Top Gainers</option>
             </select>
           </div>
+          <button class="btn-download" (click)="downloadCsv()" aria-label="Download current view as CSV">
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
+            </svg>
+            Download CSV
+          </button>
         </div>
 
         <div class="table-wrapper" role="region" aria-label="Historical stocks data">
@@ -112,7 +110,7 @@ function toRow(th: TickerHistory): HistoryRow {
                 <th scope="col" class="col-ticker">Ticker</th>
                 <th scope="col" class="col-price">Last Price</th>
                 <th scope="col" class="col-change">{{ changeLabel() }}</th>
-                <th scope="col" class="col-mentions">Reddit Score</th>
+                <th scope="col" class="col-mentions">Reddit Posts</th>
                 <th scope="col" class="col-time">Last Seen</th>
               </tr>
             </thead>
@@ -125,7 +123,7 @@ function toRow(th: TickerHistory): HistoryRow {
                       <span class="ticker-sym">{{ row.ticker }}</span>
                     </td>
                     <td class="col-price price-val">
-                      @if (row.lastPrice > 0) {
+                      @if (row.lastPrice != null && row.lastPrice > 0) {
                         &#36;{{ row.lastPrice | number:'1.2-2' }}
                       } @else {
                         <span class="na">—</span>
@@ -133,16 +131,16 @@ function toRow(th: TickerHistory): HistoryRow {
                     </td>
                     <td
                       class="col-change change-val"
-                      [class.positive]="row.priceChange > 0"
-                      [class.negative]="row.priceChange < 0"
+                      [class.positive]="(row.periodPriceChange ?? 0) > 0"
+                      [class.negative]="(row.periodPriceChange ?? 0) < 0"
                     >
-                      @if (row.lastPrice > 0) {
-                        {{ row.priceChange >= 0 ? '+' : '' }}{{ row.percentChange | number:'1.2-2' }}%
+                      @if (row.periodPriceChange != null) {
+                        {{ row.periodPriceChange >= 0 ? '+' : '' }}{{ row.periodPriceChange | number:'1.2-2' }}%
                       } @else {
                         <span class="na">—</span>
                       }
                     </td>
-                    <td class="col-mentions mentions-val">{{ row.mentionCount | number }}</td>
+                    <td class="col-mentions mentions-val">{{ row.periodPostCount | number }}</td>
                     <td class="col-time time-val">{{ row.lastDate }}</td>
                   </tr>
                 }
@@ -169,23 +167,23 @@ function toRow(th: TickerHistory): HistoryRow {
 export class HistoryComponent {
   private readonly histService = inject(HistoryService);
 
-  readonly period    = signal<HistoryPeriod>('1mo');
+  readonly period      = signal<HistoryPeriod>('month');
   readonly searchQuery = signal('');
-  readonly sortBy    = signal<SortOption>('mentions');
+  readonly sortBy      = signal<SortOption>('mentions');
 
   readonly periods: { value: HistoryPeriod; label: string }[] = [
-    { value: '1mo', label: '1 Month' },
-    { value: '6mo', label: '6 Months' },
-    { value: '1yr', label: '1 Year' },
+    { value: 'day',   label: 'Day' },
+    { value: 'week',  label: 'Week' },
+    { value: 'month', label: 'Month' },
+    { value: 'year',  label: 'Year' },
   ];
 
-  readonly changeLabel = computed(() => {
-    switch (this.period()) {
-      case '1mo': return '1 Month Change';
-      case '6mo': return '6 Month Change';
-      case '1yr': return '1 Year Change';
-    }
-  });
+  readonly changeLabel = computed(() => ({
+    day:   "Today's change",
+    week:  "This week's change",
+    month: "This month's change",
+    year:  "This year's change",
+  }[this.period()]));
 
   readonly state = computed(() => this.histService.getState(this.period())());
 
@@ -199,12 +197,38 @@ export class HistoryComponent {
     }
 
     return [...rows].sort((a, b) => {
-      if (sort === 'change') return b.percentChange - a.percentChange;
-      return b.mentionCount - a.mentionCount;
+      if (sort === 'change') {
+        return (b.periodPriceChange ?? -Infinity) - (a.periodPriceChange ?? -Infinity);
+      }
+      return b.periodPostCount - a.periodPostCount;
     });
   });
 
   constructor() {
     effect(() => { this.histService.load(this.period()); });
+  }
+
+  downloadCsv(): void {
+    const rows   = this.filteredRows();
+    const period = this.period();
+    const header = 'Rank,Ticker,Last Price,Period Change (%),Reddit Posts,Last Seen';
+    const lines  = rows.map((r, i) =>
+      [
+        i + 1,
+        r.ticker,
+        r.lastPrice != null ? r.lastPrice.toFixed(2) : '',
+        r.periodPriceChange != null ? r.periodPriceChange.toFixed(2) : '',
+        r.periodPostCount,
+        r.lastDate,
+      ].join(',')
+    );
+    const csv  = [header, ...lines].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `harrys-risers-${period}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 }

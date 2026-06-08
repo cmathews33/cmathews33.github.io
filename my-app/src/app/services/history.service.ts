@@ -19,9 +19,10 @@ export class HistoryService {
   private readonly destroyRef = inject(DestroyRef);
 
   private readonly _states: Record<HistoryPeriod, WritableSignal<PeriodState>> = {
-    '1mo': signal<PeriodState>(INITIAL_STATE),
-    '6mo': signal<PeriodState>(INITIAL_STATE),
-    '1yr': signal<PeriodState>(INITIAL_STATE),
+    'day':   signal<PeriodState>(INITIAL_STATE),
+    'week':  signal<PeriodState>(INITIAL_STATE),
+    'month': signal<PeriodState>(INITIAL_STATE),
+    'year':  signal<PeriodState>(INITIAL_STATE),
   };
 
   getState(period: HistoryPeriod): Signal<PeriodState> {

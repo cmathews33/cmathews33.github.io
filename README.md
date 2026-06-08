@@ -9,20 +9,27 @@ collector) behind API Gateway, backed by DynamoDB.
 ## Architecture
 
 ```
-EventBridge (15 min during US market hours, hourly otherwise)
-  -> CollectorFunction -> Reddit RSS + yfinance -> DynamoDB (live snapshot + daily history)
-API Gateway -> ApiFunction (Flask) -> DynamoDB (live + accumulated history) -> JSON
+EventBridge (5 mode schedules: accumulate / select / open / price / close)
+  -> CollectorFunction -> Reddit RSS + yfinance -> DynamoDB (live snapshot + daily trend records)
+API Gateway -> ApiFunction (Flask) -> DynamoDB (live + accumulated daily records) -> JSON
 Angular (GitHub Pages) <- GET /api/stocks, GET /api/historical
 ```
+
+The top-20 list is **frozen once per day**: Reddit posts are accumulated through the day and
+the top 20 by **post count** are frozen at midnight ET (with links to the posts). Prices
+refresh intraday for that frozen list; at the close, one **daily trend record** per ticker
+(start-of-day price, end-of-day price, % change, post count, post links) is written to history.
+One Lambda image serves all five phases — `app/handlers.collector_handler` dispatches on the
+schedule's `Input` `mode`.
 
 - **Reddit source is pluggable** (`app/sources/`): `rss` (default, no registration)
   today; `praw` later via `REDDIT_SOURCE=praw` when Reddit registration clears.
   Subreddits are fetched concurrently.
-- **`/api/historical` serves accumulated trend history** from DynamoDB daily
-  snapshots (not a live yfinance call). Seed it once with the backfill below.
+- **`/api/historical` serves accumulated daily trend records** from DynamoDB (not a live
+  yfinance call). Seed it once with the backfill below.
 - **StockTwits was removed** — Reddit is the intended signal.
-- **Ticker scoring** in `app/services/ticker_utils.py` is a direct port of the
-  original `ticker-utils.ts`.
+- **`mentionScore` is a plain post count** (no weighting); ticker extraction lives in
+  `app/services/ticker_utils.py`.
 
 ---
 
@@ -97,12 +104,17 @@ aws dynamodb create-table --endpoint-url http://localhost:8001 \
   --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=S \
   --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE
 
-# Seed ~1y of daily price history (mentions accumulate live afterward)
+# Seed price history + discover Reddit-trending tickers for each time window
+# (day / week / month / year — uses Reddit's ?t= sort to find who was trending)
 .venv/bin/python -m scripts.backfill_history
 
+# Or target a single period:
+.venv/bin/python -m scripts.backfill_history --period month
+
 # Restart Flask with the same env, then:
-curl "http://localhost:8000/api/historical?period=1mo"
-curl "http://localhost:8000/api/historical?ticker=AAPL&period=6mo"
+curl "http://localhost:8000/api/historical?period=month"
+curl "http://localhost:8000/api/historical?ticker=AAPL&period=week"
+# Valid period values: day | week | month | year  (old 1mo/6mo/1yr return 400)
 ```
 
 Without a table, `/api/historical` returns 503 (and `/api/stocks` still computes
@@ -153,9 +165,9 @@ sam local start-api   # serves on http://localhost:3000
 - **yfinance** can be throttled on shared Lambda IPs. The collector caches results
   in DynamoDB so the API hot path rarely calls Yahoo. Add a `stooq` fallback in
   `app/services/prices.py` if throttling becomes an issue.
-- **Historical = accumulated daily snapshots**, not a live price call. Real *price*
-  history is seeded immediately by `scripts/backfill_history.py`; *mention/sentiment*
-  history then accumulates from each scheduled collector run.
+- **Historical = accumulated daily trend records**, not a live price call. Real *price*
+  history is seeded immediately by `scripts/backfill_history.py` (price-only); the real
+  per-day record (SOD/EOD/% change/post count/post links) is written by the daily `close` run.
 - **Live prices are batched** (`yf.Tickers()`); names fall back to the ticker symbol
   on the hot path (the old per-ticker `.info` call was removed for speed).
 - **Delisted/invalid symbols** (e.g. `$IRA`) are silently dropped by yfinance.

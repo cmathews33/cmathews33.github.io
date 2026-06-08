@@ -87,8 +87,9 @@ type SortOption = 'mentions' | 'change';
                 <th scope="col" class="col-name">Company</th>
                 <th scope="col" class="col-price">Price</th>
                 <th scope="col" class="col-change">24h Change</th>
-                <th scope="col" class="col-mentions">Reddit Score</th>
-                <th scope="col" class="col-time">Reddit Post</th>
+                <th scope="col" class="col-mentions">Reddit Posts</th>
+                <th scope="col" class="col-time">Last Post</th>
+                <th scope="col" class="col-posts">Discussions</th>
               </tr>
             </thead>
             <tbody>
@@ -102,7 +103,10 @@ type SortOption = 'mentions' | 'change';
                     <td class="col-name company-name">{{ stock.name }}</td>
                     <td class="col-price price-val">
                       @if (stock.price > 0) {
-                        &#36;{{ stock.price | number:'1.2-2' }}
+                        <div>&#36;{{ stock.price | number:'1.2-2' }}</div>
+                        @if (stock.sodPrice != null) {
+                          <div class="sod-price">SOD: &#36;{{ stock.sodPrice | number:'1.2-2' }}</div>
+                        }
                       } @else {
                         <span class="na">—</span>
                       }
@@ -120,11 +124,44 @@ type SortOption = 'mentions' | 'change';
                     </td>
                     <td class="col-mentions mentions-val">{{ stock.mentionScore | number }}</td>
                     <td class="col-time time-val">{{ stock.postTimestamp | date:'MMM d, h:mm a' }}</td>
+                    <td class="col-posts">
+                      @if (stock.posts.length > 0) {
+                        <button
+                          class="posts-toggle"
+                          [attr.aria-expanded]="expandedTicker() === stock.ticker"
+                          [attr.aria-controls]="'posts-' + stock.ticker"
+                          (click)="togglePosts(stock.ticker)"
+                        >
+                          {{ expandedTicker() === stock.ticker ? 'Hide' : stock.posts.length + ' posts' }}
+                        </button>
+                      }
+                    </td>
                   </tr>
+                  @if (expandedTicker() === stock.ticker) {
+                    <tr class="posts-row" [id]="'posts-' + stock.ticker">
+                      <td colspan="8">
+                        <ul class="posts-list" aria-label="Reddit discussions for {{ stock.ticker }}">
+                          @for (post of stock.posts; track post.url) {
+                            <li>
+                              <a
+                                [href]="post.url"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                class="post-link"
+                              >
+                                <span class="post-subreddit">r/{{ post.subreddit }}</span>
+                                <span class="post-title">{{ post.title }}</span>
+                              </a>
+                            </li>
+                          }
+                        </ul>
+                      </td>
+                    </tr>
+                  }
                 }
               } @else {
                 <tr>
-                  <td colspan="7" class="no-results">No stocks match your search.</td>
+                  <td colspan="8" class="no-results">No stocks match your search.</td>
                 </tr>
               }
             </tbody>
@@ -145,8 +182,9 @@ type SortOption = 'mentions' | 'change';
 export class StockListComponent {
   readonly stockService = inject(StockService);
 
-  readonly searchQuery = signal('');
-  readonly sortBy = signal<SortOption>('mentions');
+  readonly searchQuery    = signal('');
+  readonly sortBy         = signal<SortOption>('mentions');
+  readonly expandedTicker = signal<string | null>(null);
 
   readonly topStock = computed(() => {
     const stocks = this.stockService.stocksList();
@@ -178,4 +216,7 @@ export class StockListComponent {
     });
   });
 
+  togglePosts(ticker: string): void {
+    this.expandedTicker.update(t => t === ticker ? null : ticker);
+  }
 }
